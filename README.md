@@ -29,7 +29,9 @@ Copy the generated value into `DOCAGENT_ENCRYPTION_KEY` in `.env`, then restart 
 
 Open **http://localhost:8000**. Select **Explore the demo** to analyze the bundled inventory service and download a real package without GitHub authentication or paid AI calls. The demo fingerprint is explicitly identified as a local snapshot, not a GitHub commit.
 
-Local jobs use **fakeredis by default**. No Redis server or Celery worker is needed. The in-memory queue lives inside the API process; completed documents and analysis history remain in the configured database and artifact directory. Pending jobs do not survive an application restart.
+Local jobs use **fakeredis by default**. No Redis server or Celery worker is needed. The in-memory queue lives inside the API process; completed documents and analysis history remain in the configured database and artifact storage. Pending jobs do not survive an application restart.
+
+Artifacts use local storage by default. Set `DOCAGENT_STORAGE_BACKEND=s3` to store document versions, individual files and ZIP packages in Amazon S3 or MinIO. Configure the bucket and credentials in `.env`; for MinIO also set its S3 API endpoint and `DOCAGENT_S3_ADDRESSING_STYLE=path`. See [storage configuration and migration](docs/deployment.md#artifact-storage) for complete examples. `DOCAGENT_DATA_DIR` remains the local working directory for temporary files and runtime state.
 
 ```dotenv
 DOCAGENT_JOB_BACKEND=local
@@ -111,4 +113,4 @@ The tests cover archive traversal, credential redaction, execution prevention, p
 
 Optional browser acceptance: install Playwright and its Chromium browser, start the application, then run `python scripts/ui_smoke.py`. On Windows, `--channel msedge` uses installed Edge. The browser check runs the real demo, downloads all exports, checks previews and diagrams, confirms anonymous approval is disabled and checks mobile overflow. Only repository configuration layout uses an explicitly mocked API response.
 
-Backend API: `/docs` and `/openapi.json`. Health: `/api/health`. Local data, encrypted tokens, scan cache and artifacts live under `.data/` and are excluded from Git.
+Backend API: `/docs` and `/openapi.json`. Health: `/api/health`. The default local database, runtime data and artifacts live under `.data/` and are excluded from Git. S3 mode stores artifacts in the configured bucket; encrypted tokens and scan cache remain in the database.

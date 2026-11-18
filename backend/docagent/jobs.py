@@ -18,6 +18,7 @@ from docagent.llm import enrich
 from docagent.queue import LocalJobQueue
 from docagent.schemas import AnalysisConfig
 from docagent.security import decrypt
+from docagent.storage import LocalArtifactStorage, artifact_storage
 from docagent.workflow import baseline, workflow
 
 DEMO_ROOT = Path("examples/inventory").resolve()
@@ -39,22 +40,19 @@ def stop_local_queue():
 
 
 def output_root(job_id, version=None):
-    root = settings().data_dir.resolve() / "artifacts" / str(uuid.UUID(job_id))
-    return root / f"v{version:04d}" if version is not None else root
+    """Legacy local layout, also used when migrating existing artifacts to S3."""
+    return LocalArtifactStorage(settings()).root(job_id, version)
 
 
 def export_job(db, job):
     state = {**workflow(db, job), "baseline_hash": job.baseline_hash}
-    manifest = export_package(
-        output_root(job.id, job.version),
-        job.analysis,
-        AnalysisConfig.model_validate(job.config),
-        state,
-        job.version,
-    )
-    package = output_root(job.id) / f"v{job.version:04d}.zip"
-    with package.open("rb") as stream:
-        package_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+    with artifact_storage().export_directory(job.id, job.version) as root:
+        manifest = export_package(
+            root, job.analysis, AnalysisConfig.model_validate(job.config), state, job.version,
+        )
+        with root.with_suffix(".zip").open("rb") as stream:
+            package_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+    # Remote uploads must all succeed before a version can be committed.
     db.add(
         DocumentVersion(
             job_id=job.id, version=job.version, baseline_hash=job.baseline_hash, package_sha256=package_hash
@@ -66,7 +64,7 @@ def export_job(db, job):
 def next_version(job):
     """Skip orphaned exports after a failed transaction without overwriting any version."""
     version = job.version + 1
-    while output_root(job.id, version).exists():
+    while artifact_storage().version_exists(job.id, version):
         version += 1
     return version
 
@@ -198,7 +196,7 @@ def run_job(job_id):
                     }
                 job.analysis = analysis
                 job.baseline_hash = baseline(analysis)
-                if output_root(job.id, job.version).exists():
+                if artifact_storage().version_exists(job.id, job.version):
                     job.version = next_version(job)
                 export_job(db, job)
                 job.status = "completed"
@@ -221,7 +219,7 @@ def run_job(job_id):
             job = db.get(Job, job_id)
             if job and job.worker_id == worker_id:
                 job.status = "failed"
-                job.message = "Analysis failed. Check repository access, archive limits, provider configuration and worker prerequisites. Source content and credentials were omitted from errors."
+                job.message = "Analysis failed. Check repository access, archive limits, provider configuration, artifact storage and worker prerequisites. Source content and credentials were omitted from errors."
                 job.credential = ""
                 job.lease_until = None
                 db.add(
@@ -256,9 +254,7 @@ def cleanup():
         for job in db.scalars(
             select(Job).where(Job.created < cutoff, Job.status.in_(["completed", "failed"]))
         ):
-            root = output_root(job.id)
-            if root.is_dir() and root.resolve().is_relative_to((settings().data_dir / "artifacts").resolve()):
-                shutil.rmtree(root)
+            artifact_storage().delete_job(job.id)
             db.delete(job)
             removed += 1
         db.execute(delete(UserSession).where(UserSession.expires < now()))

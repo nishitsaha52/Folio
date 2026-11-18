@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import Field, SecretStr
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from docagent.config import settings
@@ -39,7 +40,6 @@ from docagent.jobs import (
     enqueue,
     export_job,
     next_version,
-    output_root,
     start_local_queue,
     stop_local_queue,
 )
@@ -52,6 +52,13 @@ from docagent.schemas import (
     StrictModel,
 )
 from docagent.security import decrypt, encrypt, new_token, redact, token_hash
+from docagent.storage import (
+    ArtifactNotFound,
+    InvalidArtifactPath,
+    StorageError,
+    artifact_storage,
+    validate_path,
+)
 from docagent.workflow import baseline, workflow
 
 
@@ -263,6 +270,16 @@ def create_app():
     @app.exception_handler(GitHubError)
     async def github_error(request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+
+    @app.exception_handler(StorageError)
+    async def storage_error(request, exc):
+        if isinstance(exc, ArtifactNotFound):
+            return JSONResponse({"detail": "Artifact not found"}, status_code=404)
+        return JSONResponse({"detail": "Artifact storage is unavailable. Try again later."}, status_code=503)
+
+    @app.exception_handler(InvalidArtifactPath)
+    async def invalid_artifact_path(request, exc):
+        return JSONResponse({"detail": "Invalid artifact path"}, status_code=400)
 
     @app.get("/api/health")
     def health(db: DB):
@@ -536,10 +553,9 @@ def create_app():
         version = version or job.version
         if db.get(DocumentVersion, (job.id, version)) is None:
             raise HTTPException(404, "Committed document version not found")
-        manifest = output_root(job.id, version) / "manifest.json"
-        if version > job.version or not manifest.is_file():
+        if version > job.version:
             raise HTTPException(404, "Document version not found")
-        return json.loads(manifest.read_text(encoding="utf-8"))
+        return json.loads(artifact_storage().read_text(job.id, version, "manifest.json"))
 
     @app.get("/api/jobs/{job_id}/download")
     def download(job_id: str, user: User, db: DB, path: str = "", version: int | None = Query(None, ge=1)):
@@ -550,26 +566,26 @@ def create_app():
             raise HTTPException(404, "Committed document version not found")
         if version > job.version:
             raise HTTPException(404, "Document version not found")
-        root = output_root(job.id, version).resolve()
-        if not path:
-            target = root.parent / f"v{version:04d}.zip"
-        else:
-            target = (root / path).resolve()
-            if not target.is_relative_to(root) or target.is_symlink():
-                raise HTTPException(400, "Invalid artifact path")
-        if not target.is_file():
-            raise HTTPException(404, "Artifact not found")
-        return FileResponse(target, filename=target.name)
+        download = artifact_storage().download(job.id, version, path)
+        return FileResponse(
+            download.path, filename=download.filename,
+            media_type="application/zip" if not path else None,
+            background=BackgroundTask(download.cleanup) if download.cleanup else None,
+        )
 
     @app.get("/api/jobs/{job_id}/preview")
     def preview(job_id: str, path: str, user: User, db: DB):
         job = owner_job(db, user, job_id)
         require_complete(job)
-        root = output_root(job.id, job.version).resolve()
-        target = (root / path).resolve()
-        if not target.is_relative_to(root) or target.suffix != ".md" or not target.is_file():
+        if db.get(DocumentVersion, (job.id, job.version)) is None:
+            raise HTTPException(404, "Committed document version not found")
+        try:
+            validate_path(path)
+        except InvalidArtifactPath:
+            raise HTTPException(404, "Markdown preview not found") from None
+        if not path.endswith(".md"):
             raise HTTPException(404, "Markdown preview not found")
-        return {"content": target.read_text(encoding="utf-8")}
+        return {"content": artifact_storage().read_text(job.id, job.version, path)}
 
     @app.get("/api/jobs/{job_id}/audit")
     def audit(job_id: str, user: User, db: DB):

@@ -7,6 +7,7 @@ import pytest
 os.environ["DOCAGENT_ENV"] = "development"
 os.environ["DOCAGENT_JOB_BACKEND"] = "local"
 os.environ["DOCAGENT_REDIS_BACKEND"] = "fake"
+os.environ["DOCAGENT_STORAGE_BACKEND"] = "local"
 os.environ["DOCAGENT_DATA_DIR"] = str(Path(".data/test-default").resolve())
 os.environ["DOCAGENT_DATABASE_URL"] = "sqlite:///" + str(Path(".data/test-default/test.db").resolve())
 
@@ -16,6 +17,7 @@ def isolated(tmp_path, monkeypatch):
     from docagent.config import settings
     from docagent.db import engine
     from docagent.security import cipher
+    from docagent.storage import artifact_storage
 
     monkeypatch.setenv("DOCAGENT_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("DOCAGENT_DATABASE_URL", "sqlite:///" + str(tmp_path / "db.sqlite"))
@@ -23,11 +25,13 @@ def isolated(tmp_path, monkeypatch):
     settings.cache_clear()
     engine.cache_clear()
     cipher.cache_clear()
+    artifact_storage.cache_clear()
     yield tmp_path
     engine().dispose()
     engine.cache_clear()
     settings.cache_clear()
     cipher.cache_clear()
+    artifact_storage.cache_clear()
 
 
 @pytest.fixture

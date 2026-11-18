@@ -6,6 +6,7 @@ x-application: &application
   environment: &environment
     DOCAGENT_ENV: production
     DOCAGENT_DATA_DIR: /data
+    DOCAGENT_STORAGE_BACKEND: ${DOCAGENT_STORAGE_BACKEND:-local}
     DOCAGENT_DATABASE_URL: postgresql+psycopg://docagent:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/docagent
     DOCAGENT_JOB_BACKEND: celery
     DOCAGENT_REDIS_BACKEND: real
@@ -14,6 +15,7 @@ x-application: &application
     DOCAGENT_PUBLIC_URL: ${DOCAGENT_PUBLIC_URL:?Set your HTTPS URL}
     DOCAGENT_TEST_EXECUTION_ENABLED: "false"
   volumes:
+    # Local artifacts, or scratch/runtime data when using S3. S3 settings come from .env.
     - artifacts:/data
   restart: unless-stopped
   security_opt:
