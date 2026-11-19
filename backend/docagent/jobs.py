@@ -1,7 +1,9 @@
 import hashlib
+import logging
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -15,6 +17,7 @@ from docagent.documents import export_package
 from docagent.execution import execute_tests
 from docagent.github import GitHub
 from docagent.llm import enrich
+from docagent.logging_config import job_log_context, safe_error
 from docagent.queue import LocalJobQueue
 from docagent.schemas import AnalysisConfig
 from docagent.security import decrypt
@@ -23,6 +26,32 @@ from docagent.workflow import baseline, workflow
 
 DEMO_ROOT = Path("examples/inventory").resolve()
 local_queue: LocalJobQueue | None = None
+logger = logging.getLogger(__name__)
+
+
+def log_worker_status():
+    """Advisory startup check: an available API does not imply a Celery consumer exists."""
+    cfg = settings()
+    logger.info("Job execution configured backend=%s redis=%s storage=%s",
+                cfg.job_backend, cfg.redis_backend, cfg.storage_backend)
+    if cfg.job_backend != "celery":
+        return
+    try:
+        from docagent.worker import celery
+
+        with celery.connection_for_read(connect_timeout=2) as connection:
+            connection.transport_options.update(socket_connect_timeout=2, socket_timeout=2)
+            connection.ensure_connection(max_retries=0, timeout=2)
+            workers = celery.control.inspect(timeout=1, connection=connection).ping() or {}
+    except Exception as exc:
+        logger.error("Worker availability check failed %s; check Redis connectivity", safe_error(exc))
+        return
+    if workers:
+        logger.info("Celery worker availability responding_workers=%d", len(workers))
+    else:
+        logger.warning("No Celery worker replied. Analyses will remain queued. "
+                       "serve starts the API only; start 'docagent worker --pool solo --concurrency 1' "
+                       "in another terminal on Windows, and 'docagent scheduler' for recovery.")
 
 
 def start_local_queue():
@@ -83,6 +112,7 @@ def set_progress(job_id, worker_id, value, message):
         db.commit()
         if not changed.rowcount:
             raise WorkerLeaseLost()
+    logger.info("Job progress job_id=%s progress=%d stage=%s", job_id, value, message)
 
 
 def pin_commit(job_id, worker_id, commit):
@@ -125,12 +155,16 @@ def run_job(job_id):
         )
         db.commit()
         if not claimed.rowcount:
+            logger.debug("Job delivery skipped job_id=%s reason=already_claimed_or_finished", job_id)
             return
         job = db.get(Job, job_id)
         config = AnalysisConfig.model_validate(job.config)
         credential = job.credential
         owner = job.owner
         resolved_commit = job.resolved_commit
+    context = job_log_context.set(job_id)
+    started = time.monotonic()
+    logger.info("Job started job_id=%s progress=5 stage=Retrieving repository", job_id)
     stop = threading.Event()
 
     def heartbeat():
@@ -143,8 +177,9 @@ def run_job(job_id):
                         .values(lease_until=now() + timedelta(minutes=3))
                     )
                     heartbeat_db.commit()
-            except Exception:
+            except Exception as exc:
                 # Transient DB outages are retried at the next heartbeat. No source or keys in logs.
+                logger.warning("Worker lease renewal failed job_id=%s %s", job_id, safe_error(exc))
                 continue
 
     thread = threading.Thread(target=heartbeat, daemon=True, name="docagent-lease")
@@ -246,9 +281,13 @@ def run_job(job_id):
                     )
                 )
                 db.commit()
+        logger.info("Job completed job_id=%s progress=100 duration_seconds=%.1f", job_id, time.monotonic() - started)
     except WorkerLeaseLost:
+        logger.warning("Job stopped job_id=%s reason=worker_lease_lost", job_id)
         return
-    except Exception:
+    except Exception as exc:
+        logger.error("Job failed job_id=%s duration_seconds=%.1f %s",
+                     job_id, time.monotonic() - started, safe_error(exc))
         # Source and SDK exceptions can contain secrets. Persist a fixed message only.
         with session_factory()() as db:
             job = db.get(Job, job_id)
@@ -269,17 +308,26 @@ def run_job(job_id):
     finally:
         stop.set()
         thread.join(timeout=2)
+        job_log_context.reset(context)
 
 
 def enqueue(job_id):
-    if settings().job_backend == "celery":
-        from docagent.worker import analyze_task
+    backend = settings().job_backend
+    logger.info("Job dispatch requested job_id=%s backend=%s", job_id, backend)
+    try:
+        if backend == "celery":
+            from docagent.worker import analyze_task
 
-        analyze_task.delay(job_id)
-    else:
-        if local_queue is None:
-            raise RuntimeError("Local queue has not started")
-        return local_queue.enqueue(job_id)
+            delivery = analyze_task.delay(job_id)
+        else:
+            if local_queue is None:
+                raise RuntimeError("Local queue has not started")
+            delivery = local_queue.enqueue(job_id)
+    except Exception as exc:
+        logger.error("Job dispatch failed job_id=%s backend=%s %s", job_id, backend, safe_error(exc))
+        raise
+    logger.info("Job dispatched job_id=%s backend=%s; awaiting worker claim", job_id, backend)
+    return delivery
 
 
 def cleanup():
@@ -307,6 +355,7 @@ def recover_jobs():
             )
         ).all()
         for job in jobs:
+            logger.warning("Job recovery dispatch job_id=%s previous_status=%s", job.id, job.status)
             if job.status == "running":
                 db.add(
                     Audit(

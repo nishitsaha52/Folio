@@ -1,6 +1,7 @@
 import logging
 import sys
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from docagent.cli import main
@@ -83,3 +84,55 @@ def test_worker_and_scheduler_forward_configured_level(isolated, monkeypatch):
     assert calls[0] == ["worker", "--loglevel=ERROR", "--concurrency=1", "--pool=solo"]
     assert calls[1] == ["beat", "--loglevel=DEBUG", "--schedule=" + str(isolated / "beat" / "state")]
     assert (isolated / "beat").is_dir()
+
+
+def test_missing_worker_is_reported_without_failing_api_startup(monkeypatch, caplog):
+    import docagent.jobs as jobs
+
+    cfg = Settings(_env_file=None, job_backend="celery", redis_backend="real")
+    monkeypatch.setattr(jobs, "settings", lambda: cfg)
+    celery = MagicMock()
+    celery.control.inspect.return_value.ping.return_value = {}
+    monkeypatch.setitem(sys.modules, "docagent.worker", SimpleNamespace(celery=celery))
+    with caplog.at_level(logging.INFO):
+        jobs.log_worker_status()
+    assert "No Celery worker replied" in caplog.text
+    assert "serve starts the API only" in caplog.text
+    celery.control.inspect.assert_called_once()
+    caplog.clear()
+    celery.connection_for_read.side_effect = RuntimeError("private-redis-password")
+    jobs.log_worker_status()
+    assert "Worker availability check failed" in caplog.text
+    assert "private-redis-password" not in caplog.text
+
+
+def test_api_diagnostics_log_routes_without_query_headers_or_raw_paths(client, caplog):
+    configure_logging("DEBUG")
+    caplog.set_level(logging.DEBUG)
+    secret = "private-request-value"
+    response = client.get(f"/api/jobs/{secret}", params={"token": secret},
+                          headers={"Authorization": "Bearer " + secret})
+    assert response.status_code == 404
+    assert response.headers["X-Request-ID"] in caplog.text
+    assert "route=/api/jobs/{job_id}" in caplog.text
+    assert "status=404" in caplog.text
+    assert secret not in caplog.text
+    caplog.clear()
+    assert client.get("/api/session").status_code == 200
+    assert "status=200" in caplog.text
+
+
+def test_unexpected_api_failure_has_safe_diagnostic_and_response(client, monkeypatch, caplog):
+    import docagent.api as api
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("credential-and-source-content")
+
+    monkeypatch.setattr(api, "owner_job", fail)
+    response = client.get("/api/jobs/probe")
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Internal server error"
+    assert response.headers["X-Request-ID"] == response.json()["request_id"]
+    assert "error_type=RuntimeError" in caplog.text
+    assert "test_logging.py" in caplog.text
+    assert "credential-and-source-content" not in caplog.text + response.text

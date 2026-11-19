@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
 from docagent.analysis import scan_repository
 from docagent.llm import enrich
@@ -113,3 +116,44 @@ def test_ai_scenarios_are_traceable_and_never_executed(tmp_path):
         )
         == 1
     )
+
+
+def test_gemini_uses_json_schema_without_legacy_schema_conversion(monkeypatch):
+    import docagent.llm as llm
+    from docagent.config import Settings
+    from google import genai
+
+    cfg = Settings(_env_file=None, gemini_api_key="test-key")
+    monkeypatch.setattr(llm, "settings", lambda: cfg)
+    client = MagicMock()
+    client.models.generate_content.return_value = SimpleNamespace(
+        text='{"requirements":[],"gaps":[]}',
+        usage_metadata=SimpleNamespace(prompt_token_count=1, candidates_token_count=2),
+    )
+    manager = MagicMock()
+    manager.__enter__.return_value = client
+    monkeypatch.setattr(genai, "Client", lambda **kwargs: manager)
+    result, usage = llm.call_provider("gemini", "configured-model", "Synthetic evidence")
+    config = client.models.generate_content.call_args.kwargs["config"]
+    assert config.response_schema is None
+    assert config.response_json_schema == LLMOutput.model_json_schema()
+    assert config.response_json_schema["additionalProperties"] is False
+    assert result == LLMOutput(requirements=[], gaps=[])
+    assert usage == {"input_tokens": 1, "output_tokens": 2}
+
+
+def test_gemini_nonretryable_http_code_is_not_retried(tmp_path, caplog):
+    from google.genai.errors import ClientError
+
+    calls = []
+
+    def fail(*_args):
+        calls.append(True)
+        raise ClientError(400, {"error": {"message": "credential-and-source-content", "status": "INVALID_ARGUMENT"}})
+
+    config = AnalysisConfig(repository="owner/repo", providers=[{"provider": "gemini", "model": "m"}])
+    result = enrich(sample(tmp_path), config, False, invoke=fail, sleep=lambda _: pytest.fail("Must not retry HTTP 400"))
+    assert len(calls) == 1
+    assert result["usage"][0]["status"] == "failed"
+    assert "http_status=400" in caplog.text
+    assert "credential-and-source-content" not in caplog.text

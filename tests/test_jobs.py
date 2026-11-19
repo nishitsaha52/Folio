@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 
 import pytest
@@ -83,3 +84,30 @@ def test_replaced_workers_cannot_pin_commits_or_change_progress(isolated):
         db.commit()
     with pytest.raises(WorkerLeaseLost):
         set_progress("job", "replacement", 80, "Late progress")
+
+
+def test_job_lifecycle_and_failure_diagnostics_do_not_log_exception_content(isolated, monkeypatch, caplog):
+    import docagent.jobs as jobs
+    from docagent.logging_config import job_log_context
+
+    init_db()
+    config = AnalysisConfig(repository="demo/inventory", formats=["md"])
+    job_id = "00000000-0000-0000-0000-000000000002"
+    with session_factory()() as db:
+        db.add(Job(id=job_id, owner="owner", repository=config.repository, config=config.model_dump(mode="json")))
+        db.commit()
+
+    def fail(*_args, **_kwargs):
+        raise ValueError("credential-and-source-content")
+
+    monkeypatch.setattr(jobs, "scan_repository", fail)
+    with caplog.at_level(logging.INFO, logger="docagent"):
+        jobs.run_job(job_id)
+    assert f"Job started job_id={job_id}" in caplog.text
+    assert "progress=25" in caplog.text
+    assert f"Job failed job_id={job_id}" in caplog.text
+    assert "error_type=ValueError" in caplog.text
+    assert "credential-and-source-content" not in caplog.text
+    assert job_log_context.get() == "-"
+    with session_factory()() as db:
+        assert db.get(Job, job_id).status == "failed"

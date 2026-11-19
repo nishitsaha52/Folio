@@ -22,7 +22,7 @@ def main():
     checks.add_argument("--api-url", help="Also create and validate a real demo through a running API")
     checks.add_argument("--timeout", type=int, default=120, help="Seconds to wait for demo generation")
     checks.add_argument("--output", type=Path, help="Save a JSON report and, with --api-url, its demo ZIP")
-    serve = commands.add_parser("serve", help="Run the local server")
+    serve = commands.add_parser("serve", help="Run the API; Celery mode also requires a separate worker")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--host", default="127.0.0.1")
     worker = commands.add_parser("worker", help="Run a Celery worker using the configured log level")

@@ -1,5 +1,15 @@
 # Validation record
 
+## 19 November 2026 queued-job and diagnostic follow-up
+
+The user's live repository analysis remained at `Waiting for worker`: configuration selected Celery, but only the native API was running. Redis contained one broker delivery, no worker replied to inspection, and process inspection found no worker or scheduler. Started separate Windows `solo` worker and scheduler processes; the original job completed at 100% with a committed document version and 204 static requirements. These user-facing background services remain running, with process IDs and log paths recorded in the ignored `.data/runtime/background-processes.json`.
+
+Added startup backend/worker diagnostics; INFO dispatch, job-stage, completion and AI-batch logs; WARNING recovery/provider-failure logs; and safe ERROR diagnostics with exception types, HTTP/SQL codes and code locations. API mutations/errors log route templates, statuses, durations and generated request IDs; successful reads/polling log at DEBUG. Request queries, headers, bodies, raw SDK messages, traceback source lines and locals are omitted. Added `httpx2`/`httpcore2` to the SDK logging floor after a regression exposed HTTPX2 URL logging.
+
+The worker logs exposed a second issue: Gemini rejected the legacy schema conversion's `additional_properties` field with HTTP 400. The original run retained static findings and recorded all 30 failed AI attempts. Changed the Gemini adapter to send JSON Schema directly while retaining strict client validation. A real empty synthetic evidence request then passed (773 input tokens, 22 output tokens); this validates the selected account/model's schema compatibility, not a full repository AI run. Fixed retry classification to recognize Gemini's numeric `code`, avoiding retries for permanent HTTP 400 responses. Restarted the idle background worker to load both fixes. Existing results were preserved rather than silently rerunning a paid repository analysis.
+
+Verification: **108 tests passed, one integration test skipped**, Ruff and diff checks passed. New regressions cover missing-worker warnings, route/query/header privacy, unexpected HTTP failures, job failure logs/context cleanup, Gemini JSON Schema serialization and nonretryable Gemini HTTP codes. A live startup diagnostic reported one responding worker. The user's existing API process must be restarted to load the updated API startup/request diagnostics; the worker and scheduler are already running. The earlier log-level configuration controlled thresholds but did not provide sufficient application instrumentation; this follow-up adds it.
+
 ## 19 November 2026 configurable logging
 
 Added case-insensitive `DOCAGENT_LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`; default `INFO`) and per-process `--log-level` overrides for `docagent serve`, `docagent worker` and `docagent scheduler`. Compose uses these entry points. HTTP access logging remains disabled; SDK loggers retain at least a `WARNING` threshold. The README documents levels, command overrides and container recreation after environment-file changes.

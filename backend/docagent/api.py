@@ -2,7 +2,9 @@ import base64
 import copy
 import hashlib
 import json
+import logging
 import secrets
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -39,11 +41,12 @@ from docagent.jobs import (
     cleanup,
     enqueue,
     export_job,
+    log_worker_status,
     next_version,
     start_local_queue,
     stop_local_queue,
 )
-from docagent.logging_config import configure_logging
+from docagent.logging_config import configure_logging, safe_error
 from docagent.schemas import (
     AnalysisConfig,
     CollaboratorInput,
@@ -62,6 +65,7 @@ from docagent.storage import (
 )
 from docagent.workflow import baseline, workflow
 
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app):
@@ -80,6 +84,7 @@ async def lifespan(app):
                 job.credential = ""
             db.commit()
     cleanup()
+    log_worker_status()
     local = settings().job_backend == "local"
     if local:
         start_local_queue()
@@ -225,6 +230,28 @@ def create_app():
     cfg = settings()
     app = FastAPI(title="Repository Documentation Agent", version="0.1.0", lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[h.strip() for h in cfg.allowed_hosts.split(",")])
+
+    @app.middleware("http")
+    async def request_diagnostics(request, call_next):
+        started = time.monotonic()
+        request_id = uuid.uuid4().hex
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            route = getattr(request.scope.get("route"), "path", "unmatched")
+            logger.error("HTTP request failed request_id=%s method=%s route=%s %s",
+                         request_id, request.method, route, safe_error(exc))
+            # Do not let the server's default exception logger emit raw credential-bearing errors.
+            return JSONResponse({"detail": "Internal server error", "request_id": request_id},
+                                status_code=500, headers={"X-Request-ID": request_id})
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        level = (logging.ERROR if response.status_code >= 500 else logging.WARNING
+                 if response.status_code >= 400 else logging.INFO
+                 if request.method not in {"GET", "HEAD", "OPTIONS"} else logging.DEBUG)
+        logger.log(level, "HTTP request request_id=%s method=%s route=%s status=%d duration_ms=%.1f",
+                   request_id, request.method, route, response.status_code, (time.monotonic() - started) * 1000)
+        response.headers["X-Request-ID"] = request_id
+        return response
 
     @app.middleware("http")
     async def security_headers(request, call_next):

@@ -42,6 +42,8 @@ Set-Location ..
 
 Run `init-db` before the first start and after application upgrades to apply database migrations explicitly. Development startup also initializes the database, which is why a separate command was previously unnecessary in the quick start. Compose runs migrations in its dedicated `migrate` service before starting the API and workers.
 
+If your `.env` selects `DOCAGENT_JOB_BACKEND=celery`, `serve` starts the API only. Start the separate [worker and scheduler](#live-service-checks) as well; otherwise analyses remain at **Waiting for worker**, even though the API is healthy. Startup now checks for responding workers and logs a warning when none replies.
+
 Open **http://localhost:8000**. Select **Explore the demo** to analyze the bundled inventory service and download a real package without GitHub authentication or paid AI calls. The demo fingerprint is explicitly identified as a local snapshot, not a GitHub commit.
 
 Local jobs use **fakeredis by default**. No Redis server or Celery worker is needed. The in-memory queue lives inside the API process; completed documents and analysis history remain in the configured database and artifact storage. Pending jobs do not survive an application restart.
@@ -101,8 +103,8 @@ DOCAGENT_LOG_LEVEL=INFO
 
 | Value | Use case |
 | --- | --- |
-| `DEBUG` | Detailed application and server diagnostics during troubleshooting. |
-| `INFO` (default) | Routine startup and worker activity, plus warnings and errors. |
+| `DEBUG` | Successful API reads/polling, duplicate job-delivery skips and other detailed diagnostics. |
+| `INFO` (default) | Backend configuration, job dispatch/start/progress/completion, AI batch attempts and API mutations, plus warnings and errors. |
 | `WARNING` | Warnings and errors with less routine output. |
 | `ERROR` | Errors and critical failures only. |
 | `CRITICAL` | Critical failures only. |
@@ -117,7 +119,9 @@ Override the level for a single process with `--log-level`:
 ./.venv/Scripts/python.exe -m docagent.cli scheduler --schedule .data/celerybeat-schedule --log-level WARNING
 ```
 
-The command-line value takes precedence over `.env`. HTTP access logs remain disabled, and HTTP/AI/storage SDK loggers stay at `WARNING` or above even with `DEBUG`, to avoid verbose request and credential-bearing output. Logs go to the console; no application log file is created. These worker/scheduler commands forward the selected level to Celery; direct `celery` commands use their own `--loglevel` option.
+The command-line value takes precedence over `.env`. API diagnostics log the route template, method, status, duration and generated request ID. Polling reads appear at `DEBUG`, mutations at `INFO`, rejected requests at `WARNING` and server failures at `ERROR`. Query strings, headers, request/response bodies and raw SDK exception messages are omitted. Job failures include the job ID, exception type, HTTP/SQL error code when available and code locations. AI batch logs include the job ID, provider, batch and attempt; failed synthesis retains static findings with recorded gaps.
+
+Uvicorn's raw HTTP access logs remain disabled, and HTTP/AI/storage SDK loggers stay at `WARNING` or above even with `DEBUG`. Entry points log to the console; redirect output if you want files. API dispatch logs appear in the API terminal; job progress and provider diagnostics appear in the worker terminal. These worker/scheduler commands forward the selected level to Celery; direct `celery` commands use their own `--loglevel` option.
 
 ## GitHub and AI configuration
 
