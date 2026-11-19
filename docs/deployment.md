@@ -6,15 +6,19 @@ Use `.env.example` as a starting point. The application never returns server-sid
 
 Set `DOCAGENT_PUBLIC_URL` to the exact HTTPS browser origin, and `DOCAGENT_ALLOWED_HOSTS` to its hostname plus `localhost` for container health checks. The reverse proxy must preserve Host, terminate TLS and restrict request size and rate. Do not enable query-string access logs on OAuth callback routes. The supplied server disables access logging. Do not enable SDK debug logging.
 
-`POSTGRES_PASSWORD` is interpolated into a connection URL. Use a long URL-safe random value or URL-encode special characters. PostgreSQL and Redis are not exposed to the host in Compose. Restrict network access between services at the infrastructure layer.
+`DOCAGENT_LOG_LEVEL` controls API, worker and scheduler console output through the supplied `docagent` entry points. It accepts `DEBUG`, `INFO` (default), `WARNING`, `ERROR` and `CRITICAL`, case-insensitively. Each entry point also accepts `--log-level` as a per-process override. SDK loggers retain a minimum `WARNING` threshold. Native processes need a restart after configuration changes; Compose containers need recreation (`docker compose up -d --force-recreate`) to reload environment files. Inspect output with `docker compose logs -f api worker scheduler`.
+
+Configure full `DOCAGENT_DATABASE_URL` and `DOCAGENT_REDIS_URL` values in `.env`, with URL-encoded credentials where necessary. The supplied Compose file reuses the existing `pgvector`, `redis` and `minio` containers on the external `infra-shared` network. It does not create infrastructure containers, publish their ports or manage their volumes. Restrict their existing host bindings and network access independently.
+
+Run `docagent compose-env` from the project root to generate the Git-ignored `.env.compose`. It preserves credentials, the database name and Redis database number while replacing loopback hosts with `pgvector:5432`, `redis:6379` and, for MinIO, `minio:9000`. The host `.env` remains unchanged. Regenerate the override after changing credentials. Compose 2.30+ is required for its raw environment-file format. Protect both files as secrets. For other aliases, use `--database-host`, `--redis-host` and `--minio-host`; configure the external network with `DOCAGENT_DOCKER_NETWORK`.
 
 ## Startup
 
-1. Set production secrets, HTTPS origin, allowed hosts and reviewer GitHub usernames.
-2. Run `docker compose build` and `docker compose up -d`. The initialization service creates the initial schema before the API and workers start.
+1. Configure PostgreSQL, authenticated Redis, the existing artifact bucket and a persistent encryption key. Ensure all three infrastructure containers share `infra-shared`. Compose honors the environment mode in `.env`; for production set `DOCAGENT_ENV=production`, the HTTPS origin, allowed hosts and reviewer GitHub usernames.
+2. Run `docagent compose-env`, `docker compose config --quiet`, `docker compose build api` and `docker compose up -d --no-build`. The initialization service applies migrations before the API and workers start. For a native installation, run `docagent init-db` explicitly before `docagent serve`.
 3. Configure an HTTPS reverse proxy to `127.0.0.1:8000` and verify `/api/health`.
 4. Register the exact GitHub OAuth callback if using OAuth. Test least-privilege PAT access for organizations and SSO.
-5. Run the external integration acceptance checks in `coverage.md` before accepting real customer data.
+5. Run `docagent check-services --write-probe` against the configured infrastructure. Once the API and worker are running, add `--api-url https://your-public-origin --output .data/live-checks/end-to-end.json` to test a real demo and save its package. For the local HTTP Compose setup, run `docker compose exec -T api docagent check-services --write-probe --api-url http://localhost:8000 --output /data/live-checks/compose.json`. See the [README live commands](../README.md#live-service-checks) and complete the external acceptance checks in `coverage.md` before accepting real customer data.
 
 API instances and workers share PostgreSQL and either the local artifact volume or the same S3 bucket/prefix. Redis transports job IDs only; repository credentials are encrypted in PostgreSQL, then removed from the job at completion. Do not expose Redis publicly. A worker credential remains encrypted in an active job during recovery. Inspect repeatedly failing jobs during operations.
 
@@ -22,9 +26,13 @@ Local mode defaults to `DOCAGENT_JOB_BACKEND=local` and `DOCAGENT_REDIS_BACKEND=
 
 To switch to a real Redis service, set `DOCAGENT_REDIS_BACKEND=real` and `DOCAGENT_REDIS_URL` in `.env`, then restart the application. Local execution can use real Redis, but its per-process queue is still temporary and does not provide restart recovery. Real Redis connection failures are reported rather than silently falling back to fakeredis.
 
-For durable workers, also set `DOCAGENT_JOB_BACKEND=celery`, configure PostgreSQL and run `celery -A docagent.worker:celery worker --loglevel=WARNING --concurrency=2` plus `celery -A docagent.worker:celery beat --loglevel=WARNING`. Use the supplied Linux containers for the Celery deployment. Compose explicitly selects `redis_backend=real`; production rejects fake Redis because in-process state cannot be shared with separate Celery workers. Workers renew a three-minute lease every 30 seconds. Celery Beat requeues expired leases and queued job IDs every minute; an atomic claim prevents duplicate deliveries from starting concurrent work. Recovery restarts the job with the same resolved input configuration and reusable content caches.
+For durable workers, also set `DOCAGENT_JOB_BACKEND=celery`, configure PostgreSQL and run `docagent worker --concurrency 2` plus `docagent scheduler --schedule .data/celerybeat-schedule`. Both use `DOCAGENT_LOG_LEVEL`; use `--log-level WARNING` to override it for one process. Use the supplied Linux containers for the Celery deployment. Compose explicitly selects `redis_backend=real`; production rejects fake Redis because in-process state cannot be shared with separate Celery workers. Workers renew a three-minute lease every 30 seconds. Celery Beat requeues expired leases and queued job IDs every minute; an atomic claim prevents duplicate deliveries from starting concurrent work. Recovery restarts the job with the same resolved input configuration and reusable content caches.
 
 ## Artifact storage
+
+Before upgrading an existing deployment, run `docagent init-db` with API and workers stopped. Revision `003` adds the persisted resolved commit; revision `004` adds the singleton queue-admission lock. Queue counts and insertion now share one transaction so simultaneous requests cannot exceed owner or global job limits. The Compose migration service applies both revisions before starting the application.
+
+GitHub jobs persist their resolved SHA before downloading source. Recovery reuses that SHA even if the requested branch or tag moves. Replaced workers cannot publish progress, change the pinned commit or commit their analysis. Existing jobs without a pinned SHA resolve it on their next execution.
 
 `DOCAGENT_STORAGE_BACKEND=local` is the default and preserves the existing layout at `DOCAGENT_DATA_DIR/artifacts/<job-id>/`. The backend is a deployment setting, independent of the local/Celery job backend and fake/real Redis settings. Configure all API, worker and scheduler processes identically, then restart them after changes.
 
@@ -58,7 +66,7 @@ DOCAGENT_S3_SECRET_ACCESS_KEY=<MINIO_SECRET_KEY>
 DOCAGENT_S3_SESSION_TOKEN=
 ```
 
-Use MinIO's S3 API port (commonly 9000), not its web console. Set the region to match the server if customized. In Docker, `localhost` refers to the application container: use a reachable service hostname such as `http://minio:9000` on a shared network, or `http://host.docker.internal:9000` for a MinIO server on the Docker Desktop host. Use HTTPS outside local development. The supplied Compose file reads the S3 settings from `.env`; it does not provision a bucket or MinIO server.
+Use MinIO's S3 API port (commonly 9000), not its web console. Set the region to match the server if customized. In Docker, `localhost` refers to the application container: the generated `.env.compose` selects `http://minio:9000` on the shared network. For other infrastructure layouts, configure a reachable endpoint; omit `--minio-host` rewriting by managing the override file directly when using a remote S3-compatible service. AWS S3 with an empty custom endpoint is left unchanged by the generator. Use HTTPS outside local development. Compose reads the remaining S3 settings from `.env`; it does not provision a bucket or MinIO server.
 
 Objects are stored as `<prefix>/artifacts/<job-id>/v0001/<file>` and `<prefix>/artifacts/<job-id>/v0001.zip`. An empty prefix uses `artifacts/` directly. The application needs bucket `s3:ListBucket` permission scoped to this prefix and object `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` and `s3:AbortMultipartUpload` permissions within it. Bucket creation and public access are unnecessary. Downloads and previews pass through the authenticated API, so the bucket can remain private and need not be accessible by the browser.
 

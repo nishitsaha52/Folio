@@ -3,13 +3,16 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DOCAGENT_", env_file=".env", extra="ignore")
     env: str = "development"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     public_url: str = "http://localhost:8000"
     allowed_hosts: str = "localhost,127.0.0.1,testserver"
     database_url: str = "sqlite:///.data/docagent.db"
@@ -48,6 +51,11 @@ class Settings(BaseSettings):
     test_image: str = ""
     test_timeout: int = 180
     frontend_dir: Path = Path("frontend/dist")
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def normalize_log_level(cls, value):
+        return value.strip().upper() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def storage(self):

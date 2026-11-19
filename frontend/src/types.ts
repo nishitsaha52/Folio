@@ -136,3 +136,11 @@ export interface Artifact {
   path: string;
   bytes: number;
 }
+
+export interface AuditEntry {
+  id: number;
+  actor: string;
+  action: string;
+  detail: Record<string, unknown>;
+  created: string;
+}

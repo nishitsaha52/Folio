@@ -17,6 +17,13 @@ class Base(DeclarativeBase):
     pass
 
 
+class JobAdmission(Base):
+    """Singleton row serializing queue admission across API processes."""
+
+    __tablename__ = "job_admission"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+
 class UserSession(Base):
     __tablename__ = "sessions"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -47,6 +54,7 @@ class Job(Base):
     # Encrypted, temporary credential for queued workers. Removed at job completion.
     credential: Mapped[str] = mapped_column(Text, default="")
     worker_id: Mapped[str] = mapped_column(String(36), default="")
+    resolved_commit: Mapped[str] = mapped_column(String(40), default="", server_default="")
     lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 

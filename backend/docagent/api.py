@@ -2,7 +2,6 @@ import base64
 import copy
 import hashlib
 import json
-import logging
 import secrets
 import uuid
 from contextlib import asynccontextmanager
@@ -16,7 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field, SecretStr
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -27,6 +26,7 @@ from docagent.db import (
     DocumentVersion,
     Job,
     JobAccess,
+    JobAdmission,
     Review,
     TestResult,
     UserSession,
@@ -43,6 +43,7 @@ from docagent.jobs import (
     start_local_queue,
     stop_local_queue,
 )
+from docagent.logging_config import configure_logging
 from docagent.schemas import (
     AnalysisConfig,
     CollaboratorInput,
@@ -64,14 +65,13 @@ from docagent.workflow import baseline, workflow
 
 @asynccontextmanager
 async def lifespan(app):
+    configure_logging(settings().log_level)
     if settings().env == "production":
         # Migrations run once as a deployment step, never concurrently across API replicas.
         with session_factory()() as db:
             db.execute(select(Job.id).limit(0))
     else:
         init_db()
-    for name in ("httpx", "httpcore", "openai", "anthropic", "google.genai"):
-        logging.getLogger(name).setLevel(logging.WARNING)
     if settings().job_backend == "local":
         with session_factory()() as db:
             for job in db.scalars(select(Job).where(Job.status.in_(["running", "queued"]))):
@@ -414,14 +414,6 @@ def create_app():
             raise HTTPException(422, "Use the demo endpoint for the bundled fixture")
         if config.execute_tests and not cfg.test_execution_enabled:
             raise HTTPException(409, "Test execution is disabled by the administrator")
-        active = db.scalar(select(func.count()).select_from(Job).where(Job.status.in_(["running", "queued"])))
-        owned = db.scalar(
-            select(func.count())
-            .select_from(Job)
-            .where(Job.owner == user.owner, Job.status.in_(["running", "queued"]))
-        )
-        if active >= 16 or owned >= cfg.max_concurrent_jobs:
-            raise HTTPException(429, "Analysis queue is full. Wait for an active job to finish.")
         if not demo:
             with GitHub(decrypt(user.token)) as github:
                 metadata = github.repository(config.repository)
@@ -431,6 +423,19 @@ def create_app():
                 raise HTTPException(
                     422, "Consent is required for each provider and fallback receiving private code"
                 )
+        # A write acquires a row lock in PostgreSQL and a writer lock in SQLite.
+        # Hold it through count + insert + commit; perform external I/O beforehand.
+        admission = db.execute(update(JobAdmission).where(JobAdmission.id == 1).values(id=1))
+        if admission.rowcount != 1:
+            raise HTTPException(503, "Queue admission is unavailable. Check database migrations.")
+        active = db.scalar(select(func.count()).select_from(Job).where(Job.status.in_(["running", "queued"])))
+        owned = db.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(Job.owner == user.owner, Job.status.in_(["running", "queued"]))
+        )
+        if active >= 16 or owned >= cfg.max_concurrent_jobs:
+            raise HTTPException(429, "Analysis queue is full. Wait for an active job to finish.")
         job = Job(
             id=str(uuid.uuid4()),
             owner=user.owner,

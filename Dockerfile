@@ -21,4 +21,4 @@ ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 DOCAGENT_DATA_DIR=/data
 USER docagent
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"
-CMD ["uvicorn", "docagent.api:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+CMD ["docagent", "serve", "--host", "0.0.0.0", "--port", "8000"]

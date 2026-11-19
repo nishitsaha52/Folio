@@ -69,10 +69,39 @@ def next_version(job):
     return version
 
 
-def set_progress(job_id, value, message):
+class WorkerLeaseLost(Exception):
+    """A replacement worker owns the job; this worker must stop publishing changes."""
+
+
+def set_progress(job_id, worker_id, value, message):
     with session_factory()() as db:
-        db.execute(update(Job).where(Job.id == job_id).values(progress=value, message=message, updated=now()))
+        changed = db.execute(
+            update(Job)
+            .where(Job.id == job_id, Job.worker_id == worker_id, Job.status == "running")
+            .values(progress=value, message=message, updated=now())
+        )
         db.commit()
+        if not changed.rowcount:
+            raise WorkerLeaseLost()
+
+
+def pin_commit(job_id, worker_id, commit):
+    with session_factory()() as db:
+        db.execute(
+            update(Job)
+            .where(
+                Job.id == job_id, Job.worker_id == worker_id,
+                Job.status == "running", Job.resolved_commit == "",
+            )
+            .values(resolved_commit=commit)
+        )
+        db.commit()
+        resolved = db.scalar(select(Job.resolved_commit).where(
+            Job.id == job_id, Job.worker_id == worker_id, Job.status == "running",
+        ))
+        if not resolved:
+            raise WorkerLeaseLost()
+        return resolved
 
 
 def run_job(job_id):
@@ -101,6 +130,7 @@ def run_job(job_id):
         config = AnalysisConfig.model_validate(job.config)
         credential = job.credential
         owner = job.owner
+        resolved_commit = job.resolved_commit
     stop = threading.Event()
 
     def heartbeat():
@@ -143,9 +173,12 @@ def run_job(job_id):
                     private = metadata["private"]
                     if private and any(p.provider not in config.consent_providers for p in config.providers):
                         raise PermissionError("Private repository AI consent is missing")
-                    commit = github.resolve(config.repository, config.ref or metadata["default_branch"])
+                    commit = resolved_commit or github.resolve(
+                        config.repository, config.ref or metadata["default_branch"]
+                    )
+                    commit = pin_commit(job_id, worker_id, commit)
                     github.download(config.repository, commit, root)
-            set_progress(job_id, 25, "Extracting syntax and dependency evidence")
+            set_progress(job_id, worker_id, 25, "Extracting syntax and dependency evidence")
             with session_factory()() as db:
                 analysis = scan_repository(
                     root, commit, config.depth, db=db, cache_scope=f"{owner}:{config.repository}"
@@ -156,19 +189,19 @@ def run_job(job_id):
                 analysis["gaps"].append(
                     "Bundled demo snapshot: commit is a content fingerprint, not a real GitHub commit. Source files are in examples/inventory."
                 )
-            set_progress(job_id, 55, "Synthesizing evidence-based requirements")
+            set_progress(job_id, worker_id, 55, "Synthesizing evidence-based requirements")
             with session_factory()() as db:
                 analysis = enrich(
                     analysis, config, private, db=db, cache_scope=f"{owner}:{config.repository}"
                 )
                 db.commit()
             if config.execute_tests:
-                set_progress(job_id, 70, "Running tests in isolated container")
+                set_progress(job_id, worker_id, 70, "Running tests in isolated container")
                 analysis["execution"] = execute_tests(root, commit, config.test_profile)
-            set_progress(job_id, 80, "Generating versioned documentation package")
+            set_progress(job_id, worker_id, 80, "Generating versioned documentation package")
             with session_factory()() as db:
                 job = db.scalar(select(Job).where(Job.id == job_id).with_for_update())
-                if job.worker_id != worker_id:
+                if job.worker_id != worker_id or job.status != "running":
                     return
                 previous = db.scalar(
                     select(Job)
@@ -213,6 +246,8 @@ def run_job(job_id):
                     )
                 )
                 db.commit()
+    except WorkerLeaseLost:
+        return
     except Exception:
         # Source and SDK exceptions can contain secrets. Persist a fixed message only.
         with session_factory()() as db:

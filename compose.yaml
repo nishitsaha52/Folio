@@ -1,57 +1,31 @@
-# Production service topology. Provide .env and terminate HTTPS at your reverse proxy.
+# Reuse pgvector, redis and minio on the existing infra-shared network.
+# Generate .env.compose first: docagent compose-env
 x-application: &application
   build: .
   image: docagent:local
-  env_file: .env
-  environment: &environment
-    DOCAGENT_ENV: production
+  env_file:
+    - path: .env
+    - path: .env.compose
+      # Preserve URL credentials containing dollar signs or quotes verbatim.
+      format: raw
+  environment:
     DOCAGENT_DATA_DIR: /data
-    DOCAGENT_STORAGE_BACKEND: ${DOCAGENT_STORAGE_BACKEND:-local}
-    DOCAGENT_DATABASE_URL: postgresql+psycopg://docagent:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/docagent
     DOCAGENT_JOB_BACKEND: celery
     DOCAGENT_REDIS_BACKEND: real
-    DOCAGENT_REDIS_URL: redis://redis:6379/0
-    DOCAGENT_ENCRYPTION_KEY: ${DOCAGENT_ENCRYPTION_KEY:?Generate a shared encryption key}
-    DOCAGENT_PUBLIC_URL: ${DOCAGENT_PUBLIC_URL:?Set your HTTPS URL}
+    DOCAGENT_PUBLIC_URL: ${DOCAGENT_PUBLIC_URL:-http://localhost:8000}
     DOCAGENT_TEST_EXECUTION_ENABLED: "false"
+  networks:
+    - infrastructure
   volumes:
-    # Local artifacts, or scratch/runtime data when using S3. S3 settings come from .env.
+    # Folio artifacts/scratch only. Existing infrastructure volumes are external.
     - artifacts:/data
   restart: unless-stopped
   security_opt:
     - no-new-privileges:true
   cap_drop:
     - ALL
-  depends_on:
-    postgres:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
 
 services:
-  postgres:
-    image: postgres:17-bookworm
-    environment:
-      POSTGRES_DB: docagent
-      POSTGRES_USER: docagent
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
-    volumes:
-      - postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U docagent -d docagent"]
-      interval: 5s
-      retries: 10
-    restart: unless-stopped
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redis:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      retries: 10
-    restart: unless-stopped
   migrate:
     <<: *application
     command: ["docagent", "init-db"]
@@ -61,13 +35,13 @@ services:
   api:
     <<: *application
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${DOCAGENT_API_PORT:-8000}:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
   worker:
     <<: *application
-    command: ["celery", "-A", "docagent.worker:celery", "worker", "--loglevel=WARNING", "--concurrency=2"]
+    command: ["docagent", "worker", "--concurrency=2"]
     healthcheck:
       disable: true
     depends_on:
@@ -75,14 +49,17 @@ services:
         condition: service_completed_successfully
   scheduler:
     <<: *application
-    command: ["celery", "-A", "docagent.worker:celery", "beat", "--loglevel=WARNING", "--schedule=/data/celerybeat-schedule"]
+    command: ["docagent", "scheduler", "--schedule=/data/celerybeat-schedule"]
     healthcheck:
       disable: true
     depends_on:
       migrate:
         condition: service_completed_successfully
 
+networks:
+  infrastructure:
+    external: true
+    name: ${DOCAGENT_DOCKER_NETWORK:-infra-shared}
+
 volumes:
-  postgres:
-  redis:
   artifacts:

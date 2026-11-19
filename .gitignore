@@ -1,4 +1,5 @@
 .env
+.env.compose*
 .venv/
 .data/
 __pycache__/

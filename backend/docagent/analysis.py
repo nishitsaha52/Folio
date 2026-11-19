@@ -14,10 +14,11 @@ from packaging.requirements import Requirement as PackageRequirement
 
 from docagent.config import settings
 from docagent.db import ScanCache, digest, save_cache
+from docagent.imports import import_edges
 from docagent.schemas import Confidence, Evidence, Finding, Requirement, TestCase
 from docagent.security import redact, redact_object, secret_path
 
-ANALYZER_VERSION = "1.1"
+ANALYZER_VERSION = "1.2"
 LANGUAGES = {
     ".py": "Python",
     ".js": "JavaScript",
@@ -124,7 +125,10 @@ def classify(path: str):
     p = Path(path)
     if (
         p.name.startswith("test_")
-        or p.name.endswith(("_test.py", ".test.ts", ".test.js", ".spec.ts", ".spec.js", "_test.go"))
+        or p.name.endswith((
+            "_test.py", ".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+            ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx", "_test.go",
+        ))
         or any(x in {"tests", "test", "__tests__"} for x in p.parts)
     ):
         return "test"
@@ -407,6 +411,26 @@ def python_analysis(c: Collector):
                         symbol=f"{name}:{host}",
                         metadata={"host": host},
                     )
+
+
+    # Preserve lexical ownership so requirements can combine a handler or model
+    # with its guards and constraints instead of creating a review item per AST node.
+    scopes = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    evidence = {item["id"]: item for item in c.evidence}
+    for finding in c.findings:
+        line = evidence[finding["evidence_ids"][0]]["start_line"]
+        enclosing = [node for node in scopes if node.lineno <= line <= node.end_lineno]
+        if enclosing:
+            scope = min(enclosing, key=lambda node: node.end_lineno - node.lineno)
+            finding["metadata"]["scope"] = qualified(scope)
+        classes = [node for node in enclosing if isinstance(node, ast.ClassDef)]
+        if classes:
+            finding["metadata"]["class_scope"] = qualified(
+                min(classes, key=lambda node: node.end_lineno - node.lineno)
+            )
 
 
 def tree_analysis(c: Collector, extension):
@@ -711,71 +735,13 @@ def scan_repository(root: Path, commit: str, depth="standard", db=None, cache_sc
             gaps.extend(payload["gaps"])
             if progress and scanned % 100 == 0:
                 progress(scanned)
-    paths = {f["path"] for f in inventory}
-    edges = []
-    for source, dependencies_ in imports.items():
-        for dep in dependencies_:
-            module = dep["module"]
-            candidates = []
-            if source.endswith(".py"):
-                base = Path(source).parent
-                if dep.get("level"):
-                    for _ in range(dep["level"] - 1):
-                        base = base.parent
-                    target = base / module.replace(".", "/")
-                else:
-                    target = Path(module.replace(".", "/"))
-                candidates = [target.as_posix() + ".py", (target / "__init__.py").as_posix()]
-                for name in dep.get("names", []):
-                    candidates.append((target / name).as_posix() + ".py")
-            elif module.startswith("."):
-                target = (root / Path(source).parent / module).resolve()
-                if target.is_relative_to(root):
-                    rel = target.relative_to(root).as_posix()
-                    candidates = [rel] + [
-                        rel + x for x in [".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.js"]
-                    ]
-            for target in candidates:
-                if target in paths and target != source:
-                    edges.append(
-                        {
-                            "source": source,
-                            "target": target,
-                            "kind": "imports",
-                            "line": dep["line"],
-                            "confidence": "verified",
-                        }
-                    )
-                    break
-    requirements = []
-    evidence_by_id = {e["id"]: e for e in evidence}
-    for f in findings:
-        if f["kind"] not in {
-            "api",
-            "function",
-            "business_rule",
-            "security",
-            "data_model",
-            "data_constraint",
-            "integration",
-        }:
-            continue
-        ev = evidence_by_id[f["evidence_ids"][0]]
-        # Function declarations are facts, but a proposed business requirement is always an inference.
-        requirements.append(
-            Requirement(
-                id=stable_id("REQ", f["id"]),
-                title=f["title"],
-                statement=f["detail"],
-                confidence=Confidence.inferred,
-                evidence_ids=f["evidence_ids"],
-                module=ev["path"],
-            ).model_dump(mode="json")
-        )
+    edges = import_edges(root, inventory, imports)
+    requirements = candidate_requirements(findings, evidence)
     if not any(f["kind"] == "test" for f in findings):
         gaps.append("No test declarations were identified in the scanned scope.")
     gaps.extend(
         [
+            "Static requirements group declarations, guards and constraints by public callable or model. Internal helpers and test code remain in findings and evidence rather than separate acceptance items.",
             "Static analysis does not establish business intent, runtime correctness, performance, availability or regulatory compliance.",
             "User roles, stakeholders, service-level targets and acceptance thresholds require authorized review.",
             "Import relationships describe code dependencies, not proven runtime data movement. Conditional calls and dynamic routing may be incomplete.",
@@ -804,6 +770,52 @@ def scan_repository(root: Path, commit: str, depth="standard", db=None, cache_sc
         "usage": [],
         "execution": None,
     }
+
+
+def candidate_requirements(findings, evidence):
+    evidence_by_id = {item["id"]: item for item in evidence}
+    relevant = {"api", "function", "business_rule", "security", "data_model", "data_constraint", "integration"}
+    routes = {
+        (evidence_by_id[item["evidence_ids"][0]]["path"], item["metadata"].get("handler"))
+        for item in findings if item["kind"] == "api"
+    }
+    groups = {}
+    for finding in findings:
+        if finding["kind"] not in relevant:
+            continue
+        ev = evidence_by_id[finding["evidence_ids"][0]]
+        path = ev["path"]
+        if classify(path) == "test":
+            continue
+        metadata = finding["metadata"]
+        scope = metadata.get("handler") or metadata.get("scope")
+        if not scope and finding["kind"] in {"function", "data_model"}:
+            scope = ev["symbol"] or finding["title"]
+        is_route = (path, scope) in routes
+        if metadata.get("class_scope") and not is_route:
+            scope = metadata["class_scope"]
+        if scope and not is_route and any(part.startswith("_") for part in scope.split(".")):
+            continue
+        groups.setdefault((path, scope or "module"), []).append(finding)
+
+    requirements = []
+    for (path, scope), members in groups.items():
+        anchor = min(members, key=lambda item: {"api": 0, "data_model": 1, "function": 2}.get(item["kind"], 3))
+        details = [anchor["detail"]]
+        for item in members:
+            if item is not anchor and item["kind"] != "function" and item["detail"] not in details:
+                details.append(item["detail"])
+        requirements.append(
+            Requirement(
+                id=stable_id("REQ", path, scope),
+                title=anchor["title"] if scope != "module" else f"Implementation rules in {path}",
+                statement="\n".join(details),
+                confidence=Confidence.inferred,
+                evidence_ids=list(dict.fromkeys(eid for item in members for eid in item["evidence_ids"])),
+                module=path,
+            ).model_dump(mode="json")
+        )
+    return requirements
 
 
 def generate_tests(requirements):

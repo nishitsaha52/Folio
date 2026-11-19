@@ -409,7 +409,13 @@ def write_rtm(path, analysis, state):
     workbook.save(path)
 
 
+def package_path(root: Path) -> Path:
+    return root.with_name(root.name + ".zip")
+
+
 def export_package(root: Path, analysis, config, state, version):
+    if package_path(root).exists():
+        raise FileExistsError("The output ZIP already exists; choose a new output directory")
     root.mkdir(parents=True, exist_ok=False)
     analysis = redact_object(analysis)
     state = redact_object(state)
@@ -462,7 +468,7 @@ def export_package(root: Path, analysis, config, state, version):
         json.dumps({"version": version, "generated": generated, "files": manifest}, indent=2),
         encoding="utf-8",
     )
-    with zipfile.ZipFile(root.parent / f"v{version:04d}.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(package_path(root), "x", zipfile.ZIP_DEFLATED) as archive:
         for file in root.rglob("*"):
             if file.is_file():
                 archive.write(file, "repository-documentation/" + file.relative_to(root).as_posix())

@@ -1,8 +1,10 @@
 from celery import Celery
 
 from docagent.config import settings
+from docagent.logging_config import configure_logging
 
 config = settings()
+configure_logging(config.log_level)
 if config.job_backend != "celery" or config.redis_backend != "real":
     raise RuntimeError("Celery workers require DOCAGENT_JOB_BACKEND=celery and DOCAGENT_REDIS_BACKEND=real")
 

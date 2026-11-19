@@ -1,0 +1,258 @@
+.configuration h1 {
+  font-family: Georgia, serif;
+  font-weight: 400;
+  margin-bottom: 10px;
+}
+.configuration .eyebrow {
+  margin-bottom: 12px;
+}
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 17px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 19px 24px;
+  margin: 27px 0;
+  color: #a2ab98;
+  font-size: 11px;
+}
+.stepper > span {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+}
+.stepper .current {
+  color: #34593f;
+}
+.stepper i {
+  border-top: 1px solid #e1e6d8;
+  width: 45px;
+}
+.config-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 295px;
+  gap: 22px;
+  align-items: start;
+}
+.panel {
+  border: 1px solid var(--line);
+  background: white;
+  border-radius: 8px;
+  padding: 23px;
+  margin-bottom: 22px;
+  min-width: 0;
+}
+.panel-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+  color: #749063;
+}
+.panel-heading h2 {
+  font-size: 15px;
+  margin: 0;
+  color: #354e35;
+  flex: 1;
+}
+.panel-heading .text-button {
+  font-size: 10px;
+}
+.selected-repo {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 14px;
+  border-radius: 6px;
+  background: #f6f8f2;
+  color: #738a62;
+}
+.selected-repo > div {
+  flex: 1;
+  min-width: 0;
+}
+.selected-repo strong {
+  font-size: 12px;
+  color: #496041;
+  overflow-wrap: anywhere;
+}
+.selected-repo a {
+  display: block;
+  font-size: 10px;
+  margin-top: 5px;
+  color: #8d9b81;
+}
+.segmented {
+  display: flex;
+  gap: 8px;
+}
+.segmented button {
+  flex: 1;
+  border: 1px solid #e3e8dc;
+  border-radius: 7px;
+  padding: 13px 4px;
+  font-size: 11px;
+  text-transform: capitalize;
+  font-weight: 500;
+  min-height: 55px;
+}
+.segmented button.selected {
+  border-color: #86a478;
+  background: #f0f5e9;
+  color: #3f6335;
+}
+.segmented small {
+  display: block;
+  font-size: 8px;
+  color: #859b72;
+  margin-top: 4px;
+}
+.form-note {
+  font-size: 10px !important;
+  color: #929e87;
+  line-height: 1.7;
+  margin: 11px 0 0 !important;
+  font-weight: 400;
+}
+.center {
+  text-align: center;
+}
+.doc-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.doc-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #e7eadf;
+  border-radius: 7px;
+  padding: 13px 10px;
+  margin: 0;
+  cursor: pointer;
+}
+.doc-option.chosen {
+  background: #fbfcf7;
+  border-color: #d7e3cb;
+}
+.doc-option > svg {
+  color: #8ea17d;
+}
+.doc-option strong {
+  display: block;
+  font-size: 10px;
+  font-weight: 550;
+}
+.doc-option small {
+  display: block;
+  font-size: 8px;
+  line-height: 1.5;
+  margin-top: 4px;
+  color: #9aa78e;
+}
+.form-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 15px;
+}
+.form-columns > label {
+  margin-top: 5px;
+}
+.checkbox-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.6;
+}
+.checkbox-note input {
+  margin-top: 2px;
+}
+.config-summary {
+  position: sticky;
+  top: 22px;
+}
+.format-options {
+  display: flex;
+  gap: 12px;
+}
+.format-options label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 0;
+  font-size: 10px;
+}
+.summary-divider {
+  border-top: 1px solid var(--line);
+  margin: 22px 0;
+}
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  margin: 14px 0;
+}
+.summary-row > span {
+  color: #929c86;
+}
+.summary-row strong {
+  font-size: 11px;
+  font-weight: 550;
+}
+.muted {
+  color: #8a9781;
+  font-size: 12px;
+}
+.progress-card {
+  padding: 75px 30px;
+  text-align: center;
+  max-width: 650px;
+  margin: 50px auto;
+}
+.progress-icon {
+  width: 75px;
+  height: 75px;
+  border-radius: 20px;
+  border: 1px solid #dde8d1;
+  background: #eef4e6;
+  display: grid;
+  place-items: center;
+  margin: 0 auto 25px;
+  color: #799b5c;
+}
+.progress-card .eyebrow {
+  justify-content: center;
+}
+.progress-card h1 {
+  font-family: Georgia, serif;
+  font-weight: 400;
+  font-size: 34px;
+}
+.progress-card > p {
+  font-size: 12px;
+  color: #8a977e;
+}
+.progress-track {
+  height: 7px;
+  background: #e9eee0;
+  border-radius: 10px;
+  margin: 30px 0 12px;
+  overflow: hidden;
+}
+.progress-track span {
+  height: 100%;
+  display: block;
+  background: #78945e;
+  transition: width 0.4s;
+}
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #8a987d;
+}

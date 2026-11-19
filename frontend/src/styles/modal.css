@@ -1,0 +1,84 @@
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: #18312166;
+  backdrop-filter: blur(4px);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 30px;
+}
+.modal {
+  width: 490px;
+  max-width: 100%;
+  max-height: calc(100vh - 60px);
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #e7eddf;
+  border-radius: 12px;
+  padding: 27px;
+  box-shadow: 0 15px 80px #1f352438;
+}
+.modal.wide {
+  width: 1000px;
+}
+.modal-heading {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.modal-heading h2 {
+  margin: 0;
+  font-size: 19px;
+}
+.modal form > label {
+  margin: 17px 0;
+}
+.modal .muted {
+  font-size: 12px;
+}
+.notice {
+  font-size: 11px;
+  line-height: 1.7;
+  background: #f6f3e7;
+  border: 1px solid #e6e0c8;
+  border-radius: 6px;
+  padding: 13px;
+  color: #9b8c5e;
+  margin: 15px 0;
+}
+.markdown-preview {
+  line-height: 1.75;
+  font-size: 13px;
+  color: #51644a;
+  overflow-wrap: anywhere;
+}
+.markdown-preview h1 {
+  font-size: 28px;
+  margin-top: 24px;
+}
+.markdown-preview h2 {
+  font-size: 20px;
+  margin-top: 30px;
+}
+.markdown-preview table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11px;
+}
+.markdown-preview td,
+.markdown-preview th {
+  border: 1px solid #dfe7d7;
+  padding: 8px;
+}
+.spin {
+  animation: spin 1.2s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

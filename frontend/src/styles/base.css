@@ -1,0 +1,147 @@
+:root {
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  color: #243630;
+  background: #f8f9f6;
+  font-synthesis: none;
+  font-weight: 400;
+  font-size: 14px;
+  --green: #214d41;
+  --green-dark: #153b31;
+  --muted: #7a857f;
+  --line: #e4e8e1;
+  --cream: #f1f3ec;
+  --white: #fff;
+  --orange: #bd723f;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+button,
+a,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+button,
+a {
+  touch-action: manipulation;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+button {
+  color: inherit;
+}
+a {
+  color: var(--green);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 3px solid #83b09b;
+  outline-offset: 3px;
+}
+h1,
+h2,
+h3,
+h4,
+p {
+  margin-top: 0;
+}
+h1 {
+  font-size: 36px;
+  line-height: 1.15;
+  letter-spacing: -1.2px;
+  font-weight: 550;
+}
+h2 {
+  font-size: 19px;
+  letter-spacing: -0.4px;
+  font-weight: 600;
+}
+h3 {
+  font-size: 15px;
+  font-weight: 600;
+}
+h4 {
+  font-size: 13px;
+}
+p {
+  line-height: 1.65;
+}
+small {
+  font-size: 12px;
+}
+svg {
+  flex-shrink: 0;
+}
+input,
+select,
+textarea {
+  color: #283e34;
+  background: white;
+  border: 1px solid #dce2d9;
+  border-radius: 7px;
+  padding: 11px 12px;
+  width: 100%;
+  min-width: 0;
+}
+input::placeholder,
+textarea::placeholder {
+  color: #9aa39b;
+}
+textarea {
+  resize: vertical;
+}
+select {
+  cursor: pointer;
+}
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--green);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+label {
+  display: block;
+  margin: 19px 0 10px;
+  font-size: 13px;
+  font-weight: 550;
+}
+label > input:not([type="checkbox"]),
+label > select,
+label > textarea {
+  margin-top: 8px;
+}
+label small {
+  display: block;
+  font-weight: 400;
+  color: var(--muted);
+  margin-top: 7px;
+}
+button {
+  border: 0;
+  background: none;
+}
