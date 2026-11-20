@@ -114,6 +114,7 @@ def main():
         from docagent.analysis import scan_repository
         from docagent.db import Job, digest, init_db, session_factory
         from docagent.documents import export_package, package_path
+        from docagent.reporting import refine_analysis
         from docagent.schemas import AnalysisConfig
         from docagent.workflow import baseline, workflow
 
@@ -129,6 +130,7 @@ def main():
         for e in analysis["evidence"]:
             e["commit"] = fingerprint
         analysis.update(repository="local/" + args.path.resolve().name, private=True)
+        analysis = refine_analysis(analysis)
         analysis["gaps"].append(
             "Local snapshot fingerprint is not a verified Git commit; source links must be resolved locally."
         )

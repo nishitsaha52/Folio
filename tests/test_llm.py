@@ -157,3 +157,98 @@ def test_gemini_nonretryable_http_code_is_not_retried(tmp_path, caplog):
     assert result["usage"][0]["status"] == "failed"
     assert "http_status=400" in caplog.text
     assert "credential-and-source-content" not in caplog.text
+
+
+def synthetic_batches(tmp_path, count=24):
+    analysis = sample(tmp_path)
+    original = analysis["evidence"][0]
+    analysis["evidence"] = [{**original, "id": f"SYN-{index}"} for index in range(count)]
+    return analysis
+
+
+def test_ai_reports_batch_progress_and_respects_total_time_budget(tmp_path, monkeypatch):
+    import docagent.llm as llm
+    from docagent.config import Settings
+
+    monkeypatch.setattr(llm, "settings", lambda: Settings(
+        _env_file=None, ai_time_budget_seconds=1, ai_request_timeout_seconds=1,
+    ))
+    clock = [0.0]
+    calls, progress = [], []
+
+    def invoke(*_args):
+        calls.append(True)
+        clock[0] = 2.0
+        return LLMOutput(requirements=[], gaps=[]), {}
+
+    config = AnalysisConfig(repository="owner/repo", providers=[{"provider": "gemini", "model": "m"}])
+    result = enrich(synthetic_batches(tmp_path), config, False, invoke=invoke, clock=lambda: clock[0],
+                    progress=lambda *args: progress.append(args))
+    assert len(calls) == 1
+    assert progress[0][:2] == (0, 3)
+    assert any(item[0] == 1 for item in progress)
+    assert progress[-1][:2] == (3, 3)
+    assert any("time budget reached" in gap for gap in result["gaps"])
+    assert result["requirements"]  # Static findings survive the budget.
+
+
+def test_repeated_invalid_outputs_stop_without_repeating_identical_calls(tmp_path):
+    from docagent.llm import ProviderResponseFailure
+
+    calls = []
+
+    def invoke(*_args):
+        calls.append(True)
+        raise ProviderResponseFailure("output_token_limit")
+
+    config = AnalysisConfig(repository="owner/repo", providers=[{"provider": "gemini", "model": "m"}])
+    result = enrich(synthetic_batches(tmp_path), config, False, invoke=invoke,
+                    sleep=lambda _: pytest.fail("Malformed responses must not be retried unchanged"))
+    assert len(calls) == 2
+    assert any("provider failures" in gap for gap in result["gaps"])
+
+
+def test_no_new_request_is_started_at_budget_edge(tmp_path, monkeypatch):
+    import docagent.llm as llm
+    from docagent.config import Settings
+
+    monkeypatch.setattr(llm, "settings", lambda: Settings(_env_file=None, ai_time_budget_seconds=2))
+    config = AnalysisConfig(repository="owner/repo", providers=[{"provider": "gemini", "model": "m"}])
+    result = enrich(sample(tmp_path), config, False, clock=lambda: 0,
+                    invoke=lambda *_: pytest.fail("Do not start a request with only two seconds remaining"))
+    assert any("time budget reached" in gap for gap in result["gaps"])
+
+
+def test_progress_failure_stops_before_any_provider_call(tmp_path):
+    from docagent.jobs import WorkerLeaseLost
+
+    def stop(*_args):
+        raise WorkerLeaseLost()
+
+    config = AnalysisConfig(repository="owner/repo", providers=[{"provider": "gemini", "model": "m"}])
+    with pytest.raises(WorkerLeaseLost):
+        enrich(sample(tmp_path), config, False, progress=stop,
+               invoke=lambda *_: pytest.fail("Replaced worker must not call provider"))
+
+
+def test_gemini_detects_truncation_before_parsing_partial_json(monkeypatch):
+    import docagent.llm as llm
+    from docagent.config import Settings
+    from google import genai
+
+    monkeypatch.setattr(llm, "settings", lambda: Settings(_env_file=None, gemini_api_key="test-key"))
+    client = MagicMock()
+    client.models.generate_content.return_value = SimpleNamespace(
+        text='{"requirements":[', candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")],
+    )
+    manager = MagicMock()
+    manager.__enter__.return_value = client
+    factory = MagicMock(return_value=manager)
+    monkeypatch.setattr(genai, "Client", factory)
+    with pytest.raises(llm.ProviderResponseFailure) as caught:
+        llm.call_provider("gemini", "model", "Synthetic evidence", timeout_seconds=2)
+    assert caught.value.reason == "output_token_limit"
+    options = factory.call_args.kwargs["http_options"]
+    assert options.timeout == 2000 and options.retry_options.attempts == 1
+    config = client.models.generate_content.call_args.kwargs["config"]
+    assert config.max_output_tokens == 12000

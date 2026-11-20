@@ -15,72 +15,71 @@ def label(value):
 
 
 def graph_sets(analysis):
+    from docagent.report_content import component
+    from docagent.reporting import resource, supporting_path, words
+
     evidence = {e["id"]: e for e in analysis["evidence"]}
-    nodes = {}
-    edges = []
-    for edge in analysis["edges"][:100]:
-        for path in (edge["source"], edge["target"]):
-            nodes[stable_id("N", path)] = path
-        edges.append((stable_id("N", edge["source"]), stable_id("N", edge["target"]), "imports"))
+    include_supporting = analysis.get("report_scope", {}).get("includes_supporting", False)
+    primary_routes = [f for f in analysis["findings"] if f["kind"] == "api" and
+                      not supporting_path(evidence[f["evidence_ids"][0]]["path"])]
+    routes = primary_routes or [f for f in analysis["findings"] if f["kind"] == "api"]
+    nodes, edges, seen = {}, [], set()
+    for edge in analysis["edges"]:
+        if not include_supporting and (supporting_path(edge["source"]) or supporting_path(edge["target"])):
+            continue
+        source, target = component(edge["source"]), component(edge["target"])
+        if source == target or (source, target) in seen:
+            continue
+        seen.add((source, target))
+        sid, tid = stable_id("N", source), stable_id("N", target)
+        nodes[sid], nodes[tid] = source, target
+        edges.append((sid, tid, "imports"))
+    displayed = edges[:12]
+    used = {node for edge in displayed for node in edge[:2]}
+    nodes = {key: value for key, value in nodes.items() if key in used}
     if not nodes:
-        for item in analysis["inventory"][:12]:
-            if item["category"] == "source":
-                nodes[stable_id("N", item["path"])] = item["path"]
-    graphs = {
-        "Architecture_Diagram": (
-            nodes,
-            edges,
-            "Verified code dependencies; deployment topology requires review",
-        )
-    }
+        nodes = {stable_id("N", item["path"]): component(item["path"]) for item in analysis["inventory"]
+                 if item["category"] == "source" and (include_supporting or not supporting_path(item["path"]))}
+        nodes = dict(list(nodes.items())[:8])
+    graphs = {"Architecture_Diagram": (nodes, displayed,
+              f"Source dependencies by responsibility; {len(displayed)} of {len(edges)} grouped relationships shown")}
     context_nodes = {"application": analysis.get("repository", "Application")}
     context_edges = []
-    api = [f for f in analysis["findings"] if f["kind"] == "api"]
-    integrations = [f for f in analysis["findings"] if f["kind"] == "integration"]
-    if api:
-        context_nodes["client"] = "API caller (inferred actor)"
-        context_edges.append(("client", "application", "declared API input"))
-    for item in integrations[:12]:
-        context_nodes[item["id"]] = item["title"]
-        context_edges.append(("application", item["id"], "HTTPS call declaration"))
-    graphs["DFD_Level_0"] = (
-        context_nodes,
-        context_edges,
-        "Context inferred from API and integration declarations",
-    )
-    process_nodes, process_edges = {}, []
-    for item in api[:35]:
-        path = evidence[item["evidence_ids"][0]]["path"]
-        nid = stable_id("N", path)
-        process_nodes[item["id"]] = item["title"]
-        process_nodes[nid] = path
-        process_edges.append((item["id"], nid, "handler declared in"))
-    for item in integrations[:12]:
-        path = evidence[item["evidence_ids"][0]]["path"]
-        nid = stable_id("N", path)
-        process_nodes[nid] = path
-        process_nodes[item["id"]] = item["title"]
-        process_edges.append((nid, item["id"], "HTTPS call"))
-    graphs["DFD_Level_1"] = (
-        process_nodes,
-        process_edges,
-        "Declared process boundaries; runtime payload movement is unverified",
-    )
-    detailed_nodes, detailed_edges = {}, []
-    for item in api[:20]:
-        handler = item["metadata"].get("handler")
-        if not handler:
+    if routes:
+        context_nodes["client"] = "Application client"
+        context_edges.append(("client", "application", "declared interface"))
+    for finding in [f for f in analysis["findings"] if f["kind"] == "integration"][:4]:
+        path = evidence[finding["evidence_ids"][0]]["path"]
+        if supporting_path(path):
             continue
-        path = evidence[item["evidence_ids"][0]]["path"]
-        nid = stable_id("N", path, handler)
-        detailed_nodes[item["id"]] = item["title"]
-        detailed_nodes[nid] = f"{path}: {handler}"
-        detailed_edges.append((item["id"], nid, "declared handler"))
-    graphs["DFD_Level_2"] = (
-        detailed_nodes,
-        detailed_edges,
-        "Handler-level detail supported by route declarations; deeper flows require review",
-    )
+        context_nodes[finding["id"]] = finding["title"]
+        context_edges.append(("application", finding["id"], "literal HTTPS call"))
+    graphs["DFD_Level_0"] = (context_nodes, context_edges,
+                              "Declared context; effective access and payloads need verification")
+    groups = {}
+    for finding in routes:
+        groups.setdefault(resource(finding["metadata"].get("route", "/")), []).append(finding)
+    process_nodes, process_edges, detail_nodes, detail_edges = {}, [], {}, []
+    for key, members in sorted(groups.items()):
+        gid = stable_id("N", "capability", key)
+        process_nodes[gid] = words(key).capitalize()
+        targets = {component(evidence[f["evidence_ids"][0]]["path"]) for f in members}
+        for target in sorted(targets):
+            tid = stable_id("N", target)
+            process_nodes[tid] = target
+            process_edges.append((gid, tid, f"{len(members)} declared operations"))
+        # One representative handler per capability; the appendix retains all routes.
+        finding = members[0]
+        handler = finding["metadata"].get("handler")
+        if handler:
+            hid = stable_id("N", key, handler)
+            detail_nodes[gid] = finding["title"]
+            detail_nodes[hid] = words(handler.split(".")[-1])
+            detail_edges.append((gid, hid, "declared handler"))
+    graphs["DFD_Level_1"] = (process_nodes, process_edges,
+                              "Application interfaces grouped by resource; examples excluded when primary routes exist")
+    graphs["DFD_Level_2"] = (detail_nodes, detail_edges,
+                              "One representative handler per capability; full route list in API Reference")
     return graphs
 
 
@@ -133,38 +132,38 @@ def export_graph(directory, name, graph):
     svg = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="white"/>',
-        f'<text x="30" y="28" font-family="Arial" font-size="16" fill="#172033">{html.escape(name.replace("_", " "))}</text>',
-        f'<text x="30" y="52" font-family="Arial" font-size="11" fill="#475569">{html.escape(note)}</text>',
+        f'<text x="30" y="28" font-family="Arial" font-size="24" fill="#172033">{html.escape(name.replace("_", " "))}</text>',
+        f'<text x="30" y="52" font-family="Arial" font-size="17" fill="#475569">{html.escape(note)}</text>',
     ]
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
-    font = ImageFont.load_default(size=13)
+    font = ImageFont.load_default(size=21)
     draw.text((30, 15), name.replace("_", " "), fill="#172033", font=font)
-    draw.text((30, 40), note, fill="#475569", font=ImageFont.load_default(size=11))
+    draw.text((30, 40), note, fill="#475569", font=ImageFont.load_default(size=17))
     for index, (source, relation, target) in enumerate(rows):
         y = 70 + index * 86
         for x, value in ((30, source), (650, target)):
             if not value:
                 continue
             clean = label(value)
-            lines = [clean[i : i + 49] for i in range(0, len(clean), 49)]
+            lines = [clean[i : i + 34] for i in range(0, len(clean), 34)]
             svg.append(
                 f'<rect x="{x}" y="{y}" width="420" height="62" rx="6" fill="#f1f5f9" stroke="#94a3b8"/>'
             )
             draw.rounded_rectangle((x, y, x + 420, y + 62), radius=6, fill="#f1f5f9", outline="#94a3b8")
             for j, line in enumerate(lines[:2]):
                 svg.append(
-                    f'<text x="{x + 12}" y="{y + 25 + j * 18}" font-family="Arial" font-size="13" fill="#172033">{html.escape(line)}</text>'
+                    f'<text x="{x + 12}" y="{y + 25 + j * 25}" font-family="Arial" font-size="21" fill="#172033">{html.escape(line)}</text>'
                 )
-                draw.text((x + 12, y + 15 + j * 18), line, fill="#172033", font=font)
+                draw.text((x + 12, y + 9 + j * 25), line, fill="#172033", font=font)
         if target:
             svg.append(f'<path d="M450 {y + 31} H640 l-8 -5 m8 5 l-8 5" fill="none" stroke="#64748b"/>')
             svg.append(
-                f'<text x="460" y="{y + 20}" font-family="Arial" font-size="11" fill="#475569">{html.escape(relation)}</text>'
+                f'<text x="460" y="{y + 20}" font-family="Arial" font-size="16" fill="#475569">{html.escape(relation)}</text>'
             )
             draw.line((450, y + 31, 640, y + 31), fill="#64748b", width=2)
             draw.polygon([(640, y + 31), (632, y + 26), (632, y + 36)], fill="#64748b")
-            draw.text((460, y + 10), relation, fill="#475569", font=ImageFont.load_default(size=11))
+            draw.text((460, y + 8), relation, fill="#475569", font=ImageFont.load_default(size=16))
     svg.append("</svg>")
     (directory / f"{name}.svg").write_text("\n".join(svg), encoding="utf-8")
     image.save(directory / f"{name}.png")

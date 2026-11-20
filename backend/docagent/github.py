@@ -1,5 +1,6 @@
 """Read-only GitHub API client. Credentials never enter URLs or git subprocesses."""
 
+import errno
 import io
 import re
 import stat
@@ -11,6 +12,7 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from docagent.config import settings
+from docagent.scan_scope import unreadable
 
 
 class GitHubError(Exception):
@@ -144,7 +146,7 @@ class GitHub:
         except httpx.HTTPError:
             raise GitHubError("Repository download interrupted") from None
         archive.seek(0)
-        safe_extract(archive, destination, cfg.max_expanded_bytes, cfg.max_archive_files)
+        return safe_extract(archive, destination, cfg.max_expanded_bytes, cfg.max_archive_files)
 
 
 def safe_extract(archive, destination: Path, max_bytes: int, max_files: int):
@@ -153,6 +155,7 @@ def safe_extract(archive, destination: Path, max_bytes: int, max_files: int):
     root = destination.resolve()
     total = 0
     seen = set()
+    skipped = []
     with zipfile.ZipFile(archive) as z:
         members = z.infolist()
         if len(members) > max_files:
@@ -193,6 +196,14 @@ def safe_extract(archive, destination: Path, max_bytes: int, max_files: int):
             target = root.joinpath(*parts[1:])
             if not target.resolve().is_relative_to(root):
                 raise ValueError("Archive path escaped workspace")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # ZipFile.read verifies CRC; declared uncompressed size has already been bounded.
-            target.write_bytes(z.read(entry))
+            # CRC and archive validation errors remain fatal. Only OS access
+            # failures are coverage gaps; never restore or bypass quarantines.
+            content = z.read(entry)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EPERM, errno.ENOENT, errno.EINVAL} and getattr(exc, "winerror", None) not in {5, 32, 33, 225, 226}:
+                    raise
+                skipped.append(unreadable(relative, exc, "archive_write_blocked"))
+    return skipped

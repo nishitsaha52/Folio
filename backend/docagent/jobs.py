@@ -13,12 +13,14 @@ from sqlalchemy import delete, or_, select, update
 from docagent.analysis import scan_repository
 from docagent.config import settings
 from docagent.db import Audit, DocumentVersion, Job, ScanCache, UserSession, now, session_factory
+from docagent.diagnostics import failure_details, stage_name
 from docagent.documents import export_package
 from docagent.execution import execute_tests
 from docagent.github import GitHub
 from docagent.llm import enrich
 from docagent.logging_config import job_log_context, safe_error
 from docagent.queue import LocalJobQueue
+from docagent.reporting import refine_analysis
 from docagent.schemas import AnalysisConfig
 from docagent.security import decrypt
 from docagent.storage import LocalArtifactStorage, artifact_storage
@@ -73,15 +75,25 @@ def output_root(job_id, version=None):
     return LocalArtifactStorage(settings()).root(job_id, version)
 
 
-def export_job(db, job):
+def export_job(db, job, progress=None, worker_id=None):
     state = {**workflow(db, job), "baseline_hash": job.baseline_hash}
-    with artifact_storage().export_directory(job.id, job.version) as root:
+    def publishing(completed, total, path):
+        if progress:
+            progress(1, 1, f"Uploading artifact {completed + 1}/{total}: {path}")
+
+    with artifact_storage().export_directory(job.id, job.version, on_publish=publishing) as root:
         manifest = export_package(
             root, job.analysis, AnalysisConfig.model_validate(job.config), state, job.version,
+            progress=progress,
         )
         with root.with_suffix(".zip").open("rb") as stream:
             package_hash = hashlib.file_digest(stream, "sha256").hexdigest()
-    # Remote uploads must all succeed before a version can be committed.
+    # Network/render work runs without holding the job row lock, allowing lease
+    # renewal and live progress. Fence publication after every upload succeeds.
+    if worker_id is not None:
+        db.refresh(job, with_for_update=True)
+        if job.worker_id != worker_id or job.status != "running":
+            raise WorkerLeaseLost()
     db.add(
         DocumentVersion(
             job_id=job.id, version=job.version, baseline_hash=job.baseline_hash, package_sha256=package_hash
@@ -102,16 +114,20 @@ class WorkerLeaseLost(Exception):
     """A replacement worker owns the job; this worker must stop publishing changes."""
 
 
-def set_progress(job_id, worker_id, value, message):
+def set_progress(job_id, worker_id, value, message, record=False):
     with session_factory()() as db:
         changed = db.execute(
             update(Job)
             .where(Job.id == job_id, Job.worker_id == worker_id, Job.status == "running")
             .values(progress=value, message=message, updated=now())
         )
-        db.commit()
         if not changed.rowcount:
+            db.rollback()
             raise WorkerLeaseLost()
+        if record:
+            db.add(Audit(job_id=job_id, actor="system", action="job_stage",
+                         detail={"stage": stage_name(value), "stage_progress": value, "message": message}))
+        db.commit()
     logger.info("Job progress job_id=%s progress=%d stage=%s", job_id, value, message)
 
 
@@ -138,6 +154,10 @@ def run_job(job_id):
     # Atomic transition avoids duplicate Celery deliveries running the same job twice.
     worker_id = str(uuid.uuid4())
     with session_factory()() as db:
+        previous = db.get(Job, job_id)
+        prior = ({"previous_worker": previous.worker_id, "stage": stage_name(previous.progress),
+                  "stage_progress": previous.progress, "last_message": previous.message}
+                 if previous and previous.status == "running" else None)
         claimed = db.execute(
             update(Job)
             .where(
@@ -157,11 +177,17 @@ def run_job(job_id):
         if not claimed.rowcount:
             logger.debug("Job delivery skipped job_id=%s reason=already_claimed_or_finished", job_id)
             return
+        if prior:
+            db.add(Audit(job_id=job_id, actor="system", action="worker_lease_expired", detail=prior))
         job = db.get(Job, job_id)
         config = AnalysisConfig.model_validate(job.config)
         credential = job.credential
         owner = job.owner
         resolved_commit = job.resolved_commit
+        db.add(Audit(job_id=job_id, actor="system", action="job_started",
+                     detail={"backend": settings().job_backend, "stage": "Repository retrieval",
+                             "stage_progress": 5, "message": "Worker claimed the analysis"}))
+        db.commit()
     context = job_log_context.set(job_id)
     started = time.monotonic()
     logger.info("Job started job_id=%s progress=5 stage=Retrieving repository", job_id)
@@ -188,8 +214,9 @@ def run_job(job_id):
         token = decrypt(credential)
         cfg = settings()
         cfg.data_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="docagent-source-", dir=cfg.data_dir) as temp:
+        with tempfile.TemporaryDirectory(prefix="docagent-source-", dir=cfg.data_dir, ignore_cleanup_errors=True) as temp:
             root = Path(temp) / "source"
+            download_skips = []
             if config.repository == "demo/inventory":
                 shutil.copytree(DEMO_ROOT, root)
                 from docagent.db import digest
@@ -212,11 +239,20 @@ def run_job(job_id):
                         config.repository, config.ref or metadata["default_branch"]
                     )
                     commit = pin_commit(job_id, worker_id, commit)
-                    github.download(config.repository, commit, root)
-            set_progress(job_id, worker_id, 25, "Extracting syntax and dependency evidence")
+                    download_skips = github.download(config.repository, commit, root) or []
+            set_progress(job_id, worker_id, 25, "Extracting syntax and dependency evidence", record=True)
             with session_factory()() as db:
+                def scan_progress(event):
+                    db.commit()
+                    message = (f"Inspecting source: {event['scanned_files']} files inspected; "
+                               f"{event['skipped_files']} skipped; {event['auto_excluded_files']} automatically excluded")
+                    if event["current_path"]:
+                        message += f". Current file: {event['current_path']}"
+                    set_progress(job_id, worker_id, 25, message)
+
                 analysis = scan_repository(
-                    root, commit, config.depth, db=db, cache_scope=f"{owner}:{config.repository}"
+                    root, commit, config.depth, db=db, cache_scope=f"{owner}:{config.repository}",
+                    on_event=scan_progress, skipped_paths=download_skips,
                 )
                 db.commit()
             analysis.update(repository=config.repository, private=private)
@@ -224,16 +260,25 @@ def run_job(job_id):
                 analysis["gaps"].append(
                     "Bundled demo snapshot: commit is a content fingerprint, not a real GitHub commit. Source files are in examples/inventory."
                 )
-            set_progress(job_id, worker_id, 55, "Synthesizing evidence-based requirements")
+            set_progress(job_id, worker_id, 55, "Synthesizing evidence-based requirements", record=True)
             with session_factory()() as db:
+                def ai_progress(completed, total, message):
+                    # Checkpoint cache writes before a separate progress transaction.
+                    # SQLite allows only one writer; keep network calls outside that lock.
+                    db.commit()
+                    end = 69 if config.execute_tests else 79
+                    set_progress(job_id, worker_id, 55 + int((end - 55) * completed / total), message)
+
                 analysis = enrich(
-                    analysis, config, private, db=db, cache_scope=f"{owner}:{config.repository}"
+                    analysis, config, private, db=db, cache_scope=f"{owner}:{config.repository}",
+                    progress=ai_progress,
                 )
                 db.commit()
+            analysis = refine_analysis(analysis)
             if config.execute_tests:
-                set_progress(job_id, worker_id, 70, "Running tests in isolated container")
+                set_progress(job_id, worker_id, 70, "Running tests in isolated container", record=True)
                 analysis["execution"] = execute_tests(root, commit, config.test_profile)
-            set_progress(job_id, worker_id, 80, "Generating versioned documentation package")
+            set_progress(job_id, worker_id, 80, "Generating versioned documentation package", record=True)
             with session_factory()() as db:
                 job = db.scalar(select(Job).where(Job.id == job_id).with_for_update())
                 if job.worker_id != worker_id or job.status != "running":
@@ -266,10 +311,19 @@ def run_job(job_id):
                 job.baseline_hash = baseline(analysis)
                 if artifact_storage().version_exists(job.id, job.version):
                     job.version = next_version(job)
-                export_job(db, job)
+                db.commit()
+
+                def export_progress(completed, total, message):
+                    set_progress(job_id, worker_id, 80 + int(15 * completed / max(total, 1)), message)
+
+                export_job(db, job, progress=export_progress, worker_id=worker_id)
                 job.status = "completed"
                 job.progress = 100
-                job.message = "Documentation ready for review"
+                skipped_count = len(analysis.get("scope", {}).get("skipped_files", []))
+                job.message = ("Documentation ready for review" if not skipped_count else
+                               f"Documentation ready with coverage gaps: {skipped_count} paths could not be inspected")
+                if analysis.get("scope", {}).get("budget_reached"):
+                    job.message = "Documentation ready with coverage gaps: the selected analysis budget was reached"
                 job.credential = ""
                 job.lease_until = None
                 db.add(
@@ -292,8 +346,9 @@ def run_job(job_id):
         with session_factory()() as db:
             job = db.get(Job, job_id)
             if job and job.worker_id == worker_id:
+                details = failure_details(exc, job.progress, job.message)
                 job.status = "failed"
-                job.message = "Analysis failed. Check repository access, archive limits, provider configuration, artifact storage and worker prerequisites. Source content and credentials were omitted from errors."
+                job.message = f"{details['stage']}: {details['message']}"
                 job.credential = ""
                 job.lease_until = None
                 db.add(
@@ -301,7 +356,7 @@ def run_job(job_id):
                         job_id=job.id,
                         actor="system",
                         action="generation_failed",
-                        detail={"stage_progress": job.progress},
+                        detail=details,
                     )
                 )
                 db.commit()
@@ -328,6 +383,24 @@ def enqueue(job_id):
         raise
     logger.info("Job dispatched job_id=%s backend=%s; awaiting worker claim", job_id, backend)
     return delivery
+
+
+def interrupt_local_jobs():
+    """Retain the last stage and audit history when a process-local queue is lost."""
+    with session_factory()() as db:
+        for job in db.scalars(select(Job).where(Job.status.in_(["running", "queued"]))):
+            previous_message, previous_status = job.message, job.status
+            db.add(Audit(job_id=job.id, actor="system", action="worker_interrupted", detail={
+                "stage": stage_name(job.progress), "stage_progress": job.progress,
+                "last_message": previous_message, "previous_status": previous_status,
+                "backend": "local", "reason_code": "worker_restarted",
+                "message": "The local worker restarted or the execution backend changed. Start a new analysis to retry.",
+            }))
+            job.status = "failed"
+            job.message = f"Local worker restarted or backend changed. Last stage at {job.progress}%: {previous_message}"
+            job.credential = ""
+            job.lease_until = None
+        db.commit()
 
 
 def cleanup():
@@ -362,7 +435,8 @@ def recover_jobs():
                         job_id=job.id,
                         actor="system",
                         action="worker_lease_expired",
-                        detail={"previous_worker": job.worker_id},
+                        detail={"previous_worker": job.worker_id, "stage": stage_name(job.progress),
+                                "stage_progress": job.progress, "last_message": job.message},
                     )
                 )
             enqueue(job.id)

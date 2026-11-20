@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     openai_model: str = ""
     anthropic_model: str = ""
     gemini_model: str = ""
+    ai_request_timeout_seconds: int = Field(default=60, ge=1, le=300)
+    ai_time_budget_seconds: int = Field(default=300, ge=1, le=3600)
     retention_days: int = 30
     session_hours: int = 24
     max_archive_bytes: int = 100_000_000

@@ -234,6 +234,7 @@
   font-size: 34px;
 }
 .progress-card > p {
+  overflow-wrap: anywhere;
   font-size: 12px;
   color: #8a977e;
 }
@@ -255,4 +256,39 @@
   justify-content: space-between;
   font-size: 10px;
   color: #8a987d;
+}
+.job-diagnostics {
+  margin-top: 24px;
+  text-align: left;
+  border-top: 1px solid #dde8d1;
+  padding-top: 18px;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.job-diagnostics h2 {
+  font-size: 16px;
+}
+.job-diagnostics summary,
+.scan-coverage summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.job-diagnostics li {
+  margin: 12px 0;
+}
+.job-diagnostics li p {
+  margin: 4px 0;
+}
+.scan-coverage {
+  margin: 20px 0;
+  overflow-wrap: anywhere;
+}
+.scan-coverage details {
+  margin-top: 14px;
+}
+.scan-coverage li {
+  margin: 8px 0;
+  font-size: 13px;
+  line-height: 1.5;
 }

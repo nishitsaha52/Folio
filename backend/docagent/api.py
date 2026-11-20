@@ -36,11 +36,13 @@ from docagent.db import (
     now,
     session_factory,
 )
+from docagent.diagnostics import job_diagnostics
 from docagent.github import GitHub, GitHubError
 from docagent.jobs import (
     cleanup,
     enqueue,
     export_job,
+    interrupt_local_jobs,
     log_worker_status,
     next_version,
     start_local_queue,
@@ -77,12 +79,7 @@ async def lifespan(app):
     else:
         init_db()
     if settings().job_backend == "local":
-        with session_factory()() as db:
-            for job in db.scalars(select(Job).where(Job.status.in_(["running", "queued"]))):
-                job.status = "failed"
-                job.message = "Local worker was restarted. Start a new analysis to retry."
-                job.credential = ""
-            db.commit()
+        interrupt_local_jobs()
     cleanup()
     log_worker_status()
     local = settings().job_backend == "local"
@@ -209,7 +206,8 @@ def job_view(db, job, full=False, user=None):
         "updated": job.updated.isoformat(),
     }
     if full:
-        value.update(config=job.config, analysis=job.analysis, workflow=workflow(db, job))
+        value.update(config=job.config, analysis=job.analysis, workflow=workflow(db, job),
+                     diagnostics=job_diagnostics(db, job))
         value["versions"] = list(
             db.scalars(
                 select(DocumentVersion.version)
@@ -481,16 +479,21 @@ def create_app():
                     "providers": [p.provider for p in config.providers],
                     "consent_providers": config.consent_providers,
                     "execute_tests": config.execute_tests,
+                    "backend": settings().job_backend,
                 },
             )
         )
         db.commit()
         try:
             enqueue(job.id)
-        except Exception:
+        except Exception as exc:
             job.status = "failed"
             job.message = "Background queue unavailable. Retry after the worker is restored."
             job.credential = ""
+            db.add(Audit(job_id=job.id, actor="system", action="generation_failed", detail={
+                "stage": "Waiting for worker", "stage_progress": 0, "reason_code": "queue_unavailable",
+                "error_type": type(exc).__name__, "message": job.message,
+            }))
             db.commit()
         return job_view(db, job)
 

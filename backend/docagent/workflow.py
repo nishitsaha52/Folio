@@ -50,6 +50,8 @@ def workflow(db, job):
         "results": list(latest.values()),
         "counts": counts,
         "ready_for_acceptance": bool(cases)
+        and {r["id"] for r in (job.analysis or {}).get("requirements", [])}
+        <= {case["requirement_id"] for case in cases}
         and requirements_status == "approved"
         and counts["passed"] == len(cases),
         "reviews": [

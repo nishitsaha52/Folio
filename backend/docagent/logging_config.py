@@ -26,6 +26,16 @@ def configure_logging(level: str):
 def safe_error(exc: Exception) -> str:
     """Keep exception types and locations, omitting messages, source lines and locals."""
     details = ["error_type=" + type(exc).__name__]
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, str) and reason in {
+        "output_token_limit", "empty_response", "schema_validation_failed", "incomplete_response",
+    }:
+        details.append("reason=" + reason)
+    from pydantic import ValidationError
+
+    if isinstance(exc, ValidationError):
+        types = sorted({error["type"] for error in exc.errors(include_input=False, include_context=False)})
+        details.append("validation_types=" + ",".join(types[:8]))
     status = http_status(exc)
     if status is not None:
         details.append(f"http_status={status}")

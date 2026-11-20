@@ -1,5 +1,34 @@
 # Folio Repository Documentation Agent
 
+Generated documentation groups application routes into capabilities, keeps concrete
+source-supported scenarios in the review baseline, and flags capabilities that still
+need test design. Detailed declarations, original candidates and source citations are
+retained in `06-analysis` rather than repeated throughout the main documents. Word
+and PDF exports include tables and embedded diagrams.
+
+To reformat a saved package without making GitHub or AI calls, use a new output
+directory:
+
+```powershell
+./.venv/Scripts/python.exe scripts/regenerate_documentation.py --input repository-documentation --output .data/readable-package
+```
+
+This creates a new capability baseline with approvals and execution results pending;
+it does not modify saved jobs or transfer approval from the earlier baseline.
+
+Scan scoping is automatic for dependency/cache/build directories and fingerprinted
+or minified browser bundles. Ordinary handwritten source remains included. Review
+the **Scan coverage** panel and `06-analysis/Scope_Report.md` for excluded paths,
+reasons and suggested `.docagentignore` patterns. A negated rule such as
+`!static/react/assets/custom.js` overrides an automatic generated-file exclusion.
+Ignore patterns affect analysis, not the size of the GitHub download.
+
+Unreadable source files become explicit coverage gaps so the remaining repository
+can be analysed. Invalid archives and unreadable ignore policies still stop the
+run. Progress identifies the current scan/export work, and execution history keeps
+failure and interruption checkpoints across restarts. Skipping a blocked file does
+not restore it or change antivirus settings.
+
 Folio is a Python and React application for turning a GitHub repository into a versioned, evidence-linked documentation package. It includes a working local demo, static analysis, optional AI synthesis, document exports and authenticated review workflows.
 
 The repository is an initial implementation, not a certification of production readiness. The local workflow and automated checks are runnable without credentials. Live GitHub OAuth/private-repository access, provider calls and the Docker execution worker require deployment-specific validation before production rollout. See [implementation coverage](docs/coverage.md) for precise scope and limits.
@@ -163,7 +192,20 @@ DOCAGENT_ANTHROPIC_MODEL=claude-sonnet-5-5
 DOCAGENT_GEMINI_MODEL=gemini-4-hydrogen
 ```
 
-These values prefill the interface. Users still select the provider and any fallback explicitly; setting all three model variables does not send evidence to all providers. Model values may be left blank for static-only use. Live provider calls remain unvalidated in this project: confirm account access and structured-output compatibility for the selected model before relying on it.
+These values prefill the interface. Users still select the provider and any fallback explicitly; setting all three model variables does not send evidence to all providers. Model values may be left blank for static-only use. Live Gemini synthetic and bounded repository checks are recorded in [validation](docs/validation.md); other providers and models still require account-specific acceptance.
+
+### AI progress and time limits
+
+AI synthesis reports the current batch, provider and attempt in the progress message, advancing from 55% toward 79% as batches finish. Document generation follows at 80%. A comprehensive analysis can involve many batches; successful API polling alone does not show whether an AI request has finished. Watch the worker's logs for provider attempts and results.
+
+```dotenv
+DOCAGENT_AI_REQUEST_TIMEOUT_SECONDS=60
+DOCAGENT_AI_TIME_BUDGET_SECONDS=300
+```
+
+The request timeout accepts 1–300 seconds. The total AI-phase budget accepts 1–3600 seconds and caps further provider work once reached; document generation runs afterward. Increase the budget deliberately for longer comprehensive runs. Request timeouts are capped by the remaining budget, and SDK retries are controlled by the application's retry loop. Restart workers after changing these values.
+
+Each response is limited to six concise requirements and three scenarios per requirement. Smaller evidence batches reduce oversized responses. Truncated, empty or schema-invalid responses are recorded instead of retried unchanged. Two invalid responses disable that provider for the rest of the job; permanent configuration/authentication errors disable it immediately. Only explicitly selected fallback providers are used. Available AI results and all static findings are retained, with uncovered batches and failures recorded as gaps.
 
 Private evidence requires explicit consent for **every** selected provider, including fallbacks. Secret files are excluded; known credentials are redacted. Add a `.docagentignore` using gitignore syntax to exclude proprietary paths. Redaction cannot identify every possible secret or sensitive business value. Review exclusions before authorizing external processing.
 

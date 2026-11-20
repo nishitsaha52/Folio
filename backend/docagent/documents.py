@@ -1,14 +1,18 @@
 """Seven consistent deliverables generated from a single versioned analysis snapshot."""
 
 import json
+import logging
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
-from xml.sax.saxutils import escape
 
 from docagent.diagrams import export_graph, graph_sets
+from docagent.document_renderers import markdown, write_docx, write_pdf
+from docagent.report_content import build_sections
 from docagent.security import redact_object
+
+logger = logging.getLogger(__name__)
 
 DOCUMENT_PATHS = {
     "srs": ("01-requirements", "Software_Requirements_Specification", "Software Requirements Specification"),
@@ -41,315 +45,6 @@ def evidence_text(ids, evidence, repository):
     return "\n".join(lines)
 
 
-def build_sections(kind, analysis, state):
-    evidence = {e["id"]: e for e in analysis["evidence"]}
-    repo = analysis["repository"]
-    sections = []
-
-    def section(title, body):
-        sections.append((title, body if isinstance(body, list) else [body]))
-
-    def findings(title, kinds):
-        body = []
-        for f in analysis["findings"]:
-            if f["kind"] in kinds:
-                body.append(
-                    f"{f['title']} [{f['confidence']}]\n{f['detail']}\n{evidence_text(f['evidence_ids'], evidence, repo)}"
-                )
-        section(
-            title,
-            body
-            or [
-                "No supporting evidence identified in the scanned scope. This does not prove the capability is absent."
-            ],
-        )
-
-    if kind == "srs":
-        section(
-            "Application overview and scope",
-            f"This as-is baseline documents {repo} at commit {analysis['commit']}. It records observed declarations and proposed requirements. Business purpose and stakeholder intent require review. Scope includes {analysis['stats']['scanned_files']} inspected files; exclusions and analysis budgets are recorded in the analysis summary.",
-        )
-        section(
-            "Stakeholders and roles",
-            "Project sponsor, business owner, engineering owner, QA lead, security reviewer and end-user roles: pending stakeholder identification. No names or authority are inferred from commit authors.",
-        )
-        findings("Repository described purpose", {"repository_description"})
-        section(
-            "Functional requirements",
-            [
-                f"{r['id']}  {r['title']}\nClassification: {r['confidence']}; source: {r['source']}; module: {r['module']}\n{r['statement']}\n{evidence_text(r['evidence_ids'], evidence, repo)}"
-                for r in analysis["requirements"]
-            ]
-            or ["No functional requirement candidates could be extracted."],
-        )
-        findings("Business rules and workflows", {"business_rule", "function", "entrypoint"})
-        findings("API and integration requirements", {"api", "integration"})
-        findings("Authentication and authorization", {"security"})
-        findings("Data management", {"data_model", "data_constraint", "data_access"})
-        section(
-            "Nonfunctional requirements",
-            "Availability, throughput, latency, accessibility, recovery objectives and compliance targets are unverified. Configuration declarations are evidence of configuration only; they do not establish achieved service levels.",
-        )
-    elif kind == "requirements_signoff":
-        section(
-            "Requirements baseline",
-            f"Baseline: {state['baseline_hash']}. Requirement candidates: {len(analysis['requirements'])}. Current status: {state['requirements_status']}. Approval requires an authorized reviewer acting on this exact baseline.",
-        )
-        section(
-            "Review checklist",
-            [
-                "Confirm application scope and stakeholder roles.",
-                "Review every requirement against its cited source and classify gaps.",
-                "Confirm functional, API, data, security and nonfunctional requirements.",
-                "Resolve assumptions or record explicit follow-up actions.",
-                "Confirm requirement-to-test mappings and approve the baseline through the application.",
-            ],
-        )
-        section(
-            "Change management and approval criteria",
-            "Requirement edits create a new version and invalidate previous approvals and results for that baseline. An authorized reviewer must acknowledge their decision. Comments are preserved in the audit trail.",
-        )
-        section("Stakeholder approval", approval_lines(state, "requirements"))
-    elif kind == "test_cases":
-        section(
-            "Test strategy and scope",
-            "These proposed positive, negative and boundary tests derive from requirement candidates. Refine fixtures and measurable expected outcomes during review. Generated cases are unexecuted until a reviewer records attested evidence. Existing repository test runs and manual UAT are recorded separately.",
-        )
-        section("Execution summary", [f"{key.title()}: {value}" for key, value in state["counts"].items()])
-        result_map = {r["test_case_id"]: r for r in state["results"]}
-        body = []
-        for case in analysis["test_cases"]:
-            result = result_map.get(case["id"])
-            execution = (
-                f"{result['status']} ({result['source']}, recorded by {result['reviewer']})\nActual: {result['actual']}\nEvidence: {result['evidence_reference']}\nSeverity: {result['severity']}"
-                if result
-                else "Unexecuted. Actual results: not available."
-            )
-            body.append(
-                f"{case['id']}  {case['title']}\nRequirement: {case['requirement_id']}\nPreconditions: {' '.join(case['preconditions'])}\nSteps: {' '.join(f'{i + 1}. {step}' for i, step in enumerate(case['steps']))}\nExpected: {case['expected']}\nExecution: {execution}"
-            )
-        section("Detailed test cases", body or ["No test cases generated."])
-        findings("Existing test inventory", {"test"})
-        section(
-            "Repository test execution",
-            json.dumps(analysis.get("execution"), indent=2)
-            if analysis.get("execution")
-            else "Repository tests were not executed. Test-file presence is not a passing result.",
-        )
-        section(
-            "UAT acceptance criteria",
-            "Requirements approval must be current. Each generated case needs reliable recorded evidence. All cases must pass before the application permits final acceptance. Open failures or blocked and unexecuted cases prevent acceptance. Authorized humans make the final decision.",
-        )
-    elif kind == "uat_signoff":
-        section(
-            "Release and baseline",
-            f"Application: {repo}. Source commit: {analysis['commit']}. Requirements baseline: {state['baseline_hash']}. Requirements approval: {state['requirements_status']}. UAT evidence baseline: {state['acceptance_hash']}.",
-        )
-        section(
-            "UAT execution summary", [f"{key.title()}: {value}" for key, value in state["counts"].items()]
-        )
-        failures = [
-            f"{r['test_case_id']}: {r['status']}; severity {r['severity']}; {r['actual']}"
-            for r in state["results"]
-            if r["status"] != "passed"
-        ]
-        section(
-            "Open defects and limitations",
-            failures
-            or [
-                "No defects recorded. This is not evidence of defect-free behavior; consult unexecuted case counts and analysis gaps."
-            ],
-        )
-        section(
-            "Requirement coverage and acceptance criteria",
-            f"{len(analysis['requirements'])} requirements mapped to {len(analysis['test_cases'])} generated cases in the RTM. Generated mapping is design coverage, not execution coverage. Requirements approval and verified passing results for all cases are required.",
-        )
-        section(
-            "Release readiness",
-            "Eligible for authorized human acceptance review."
-            if state["ready_for_acceptance"]
-            else "Pending. Required baseline approval or passing execution evidence is incomplete.",
-        )
-        section("Stakeholder acceptance", approval_lines(state, "uat"))
-    elif kind == "architecture":
-        section(
-            "Architecture overview",
-            "The component view is reconstructed from source declarations and resolved local imports. It does not establish a live deployment topology. Disconnected nodes are retained when relationships are unsupported. Diagram views are bounded; the complete extracted edge list is in the JSON summary.",
-        )
-        findings("Components and entry points", {"entrypoint", "class", "api"})
-        findings("Data stores and models", {"data_model", "data_constraint", "data_access"})
-        findings("Authentication and external integrations", {"security", "integration"})
-        findings("Containerization infrastructure and delivery", {"deployment"})
-        section(
-            "Component relationships",
-            [f"{e['source']} imports {e['target']} at line {e['line']}." for e in analysis["edges"]]
-            or [
-                "No local dependency edges resolved. Dynamic imports, aliases and unsupported languages require manual review."
-            ],
-        )
-        section(
-            "Architecture diagram",
-            "See Architecture_Diagram.svg, Architecture_Diagram.png, Architecture_Diagram.mmd and Architecture_Diagram.dot in this directory.",
-        )
-    elif kind == "data_flow":
-        section(
-            "Data flow scope",
-            "Diagrams show only relationships supported by declarations. Caller identity, runtime request and response payloads, inter-service messages and persistence transactions need validation where no code evidence establishes them. Arrows are labelled with the specific relationship observed.",
-        )
-        section(
-            "Level zero context",
-            "See DFD_Level_0.svg. API callers are explicitly inferred actors. External hosts appear only when a literal HTTPS call was extracted.",
-        )
-        section(
-            "Level one processes",
-            "See DFD_Level_1.svg. Routes connect to their implementing modules. No database write or inter-service edge is invented from a dependency name.",
-        )
-        section(
-            "Level two handler detail",
-            "See DFD_Level_2.svg. Route-to-handler declarations are shown where parsed. If unsupported, the diagram explicitly records insufficient evidence.",
-        )
-        findings("API inputs and outputs", {"api"})
-        findings(
-            "Data models and integrations", {"data_model", "data_constraint", "data_access", "integration"}
-        )
-    elif kind == "technology":
-        section(
-            "Technology inventory",
-            "Versions below are declared constraints unless the source specifies an exact version. A declared dependency does not establish runtime usage or installed version. Each item references its manifest or configuration evidence.",
-        )
-        section(
-            "Programming languages",
-            [
-                f"{language}: {count} inspected files."
-                for language, count in analysis["stats"]["languages"].items()
-            ],
-        )
-        for category in sorted(
-            {
-                f["metadata"].get("category", "Other")
-                for f in analysis["findings"]
-                if f["kind"] == "technology"
-            }
-        ):
-            section(
-                category,
-                [
-                    f"{f['title']}\n{f['detail']}\nModule: {f['metadata'].get('module', '.')}.\n{evidence_text(f['evidence_ids'], evidence, repo)}"
-                    for f in analysis["findings"]
-                    if f["kind"] == "technology" and f["metadata"].get("category", "Other") == category
-                ],
-            )
-    section("Assumptions dependencies and unresolved gaps", analysis["gaps"])
-    return sections
-
-
-def approval_lines(state, stage):
-    records = [r for r in state["reviews"] if r["stage"] == stage and r["current"]]
-    if not records:
-        return [
-            "Approval status: pending",
-            "Stakeholder name and role: pending authorized identification",
-            "Signature or authenticated decision: pending",
-            "Approval date: pending",
-            "Review comments: pending",
-        ]
-    return [
-        f"Decision: {r['decision']}. Authenticated reviewer: {r['reviewer']}. Date: {r['created']} UTC.\nBaseline: {r['baseline_hash']}\nComment: {r['comment']}\nRecorded application decision; no handwritten signature is fabricated."
-        for r in records
-    ]
-
-
-def markdown(title, metadata, sections):
-    lines = [f"# {title}", "", metadata, ""]
-    for heading, bodies in sections:
-        lines.extend([f"## {heading}", ""])
-        for body in bodies:
-            lines.extend([body.replace("\n", "  \n"), ""])
-    return "\n".join(lines)
-
-
-def write_docx(path, title, metadata, sections):
-    from docx import Document
-    from docx.shared import Inches, Pt, RGBColor
-
-    document = Document()
-    section = document.sections[0]
-    section.top_margin = section.bottom_margin = Inches(0.7)
-    section.left_margin = section.right_margin = Inches(0.8)
-    for name in ("Normal", "Title", "Heading 1", "Heading 2"):
-        style = document.styles[name]
-        style.font.name = "Calibri"
-        style.font.color.rgb = RGBColor(0, 0, 0)
-        style.font.size = Pt(10 if name == "Normal" else 24 if name == "Title" else 15)
-    document.styles["Normal"].paragraph_format.space_after = Pt(7)
-    document.add_paragraph(title, "Title")
-    document.add_paragraph(metadata)
-    for heading, bodies in sections:
-        document.add_heading(heading, level=1)
-        for body in bodies:
-            # Evidence URLs can be long; Word wraps them within normal paragraph width.
-            p = document.add_paragraph(body)
-            p.paragraph_format.widow_control = True
-    section.footer.paragraphs[
-        0
-    ].text = "Repository documentation | Evidence-based draft and recorded human decisions"
-    document.core_properties.title = title
-    document.core_properties.author = "Repository Documentation Agent"
-    document.save(path)
-
-
-def write_pdf(path, title, metadata, sections):
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_LEFT
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import inch
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
-
-    styles = getSampleStyleSheet()
-    styles.add(
-        ParagraphStyle(
-            "BodyWrap",
-            fontName="Helvetica",
-            fontSize=9,
-            leading=13,
-            spaceAfter=8,
-            splitLongWords=True,
-            wordWrap="LTR",
-            alignment=TA_LEFT,
-        )
-    )
-    styles["Title"].textColor = colors.black
-    styles["Heading1"].textColor = colors.black
-
-    def safe(text):
-        # Standard PDF fonts use WinAnsi. Explicit replacement avoids invisible missing glyphs.
-        return escape(text.encode("cp1252", errors="replace").decode("cp1252")).replace("\n", "<br/>")
-
-    story = [
-        Paragraph(safe(title), styles["Title"]),
-        Paragraph(safe(metadata), styles["BodyWrap"]),
-        Spacer(1, 12),
-    ]
-    for heading, bodies in sections:
-        story.append(Paragraph(safe(heading), styles["Heading1"]))
-        for body in bodies:
-            story.append(Paragraph(safe(body), styles["BodyWrap"]))
-
-    def footer(canvas, doc):
-        canvas.setFont("Helvetica", 8)
-        canvas.drawString(0.7 * inch, 0.4 * inch, "Repository documentation")
-        canvas.drawRightString(7.6 * inch, 0.4 * inch, str(doc.page))
-
-    SimpleDocTemplate(
-        str(path),
-        rightMargin=0.7 * inch,
-        leftMargin=0.7 * inch,
-        topMargin=0.7 * inch,
-        bottomMargin=0.7 * inch,
-        title=title,
-    ).build(story, onFirstPage=footer, onLaterPages=footer)
-
-
 def write_rtm(path, analysis, state):
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -369,11 +64,14 @@ def write_rtm(path, analysis, state):
         "Result source",
         "Evidence reference",
         "Commit",
+        "Expected outcome",
+        "Preparation",
+        "Actions",
     ]
     sheet.append(headers)
     requirements = {r["id"]: r for r in analysis["requirements"]}
     results = {r["test_case_id"]: r for r in state["results"]}
-    for case in analysis["test_cases"]:
+    for row_number, case in enumerate(analysis["test_cases"], 2):
         req = requirements[case["requirement_id"]]
         result = results.get(case["id"], {})
         values = [
@@ -387,15 +85,36 @@ def write_rtm(path, analysis, state):
             result.get("source", "generated"),
             result.get("evidence_reference", ""),
             analysis["commit"],
+            case["expected"],
+            "\n".join(case["preconditions"]),
+            "\n".join(case["steps"]),
         ]
         sheet.append(values)
-        for cell in sheet[sheet.max_row]:
+        # Indexing a whole row also asks openpyxl to scan for max_column.
+        # Address the known cells directly so export work stays linear.
+        for column_number in range(1, len(values) + 1):
+            cell = sheet.cell(row=row_number, column=column_number)
             cell.data_type = "s"  # Prevent spreadsheet formula injection from repository strings.
             cell.alignment = Alignment(vertical="top", wrap_text=True)
     for cell in sheet[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="243449")
-    widths = [24, 45, 38, 42, 24, 18, 20, 22, 45, 45]
+    covered = {case["requirement_id"] for case in analysis["test_cases"]}
+    coverage = workbook.create_sheet("Coverage")
+    coverage.append(["Capability", "Requirement ID", "Proposed cases", "Design status"])
+    for req in analysis["requirements"]:
+        count = sum(case["requirement_id"] == req["id"] for case in analysis["test_cases"])
+        coverage.append([req["title"], req["id"], count, "Proposed for review" if req["id"] in covered else "Test design required"])
+    for row in coverage:
+        for cell in row:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    for column, width in zip("ABCD", (40, 26, 20, 30)):
+        coverage.column_dimensions[column].width = width
+    coverage.freeze_panes = "A2"
+    coverage.auto_filter.ref = coverage.dimensions
+    widths = [24, 40, 32, 35, 24, 18, 20, 22, 35, 35, 65, 55, 65]
     from openpyxl.utils import get_column_letter
 
     for i, width in enumerate(widths, 1):
@@ -413,52 +132,102 @@ def package_path(root: Path) -> Path:
     return root.with_name(root.name + ".zip")
 
 
-def export_package(root: Path, analysis, config, state, version):
+def export_package(root: Path, analysis, config, state, version, progress=None):
     if package_path(root).exists():
         raise FileExistsError("The output ZIP already exists; choose a new output directory")
     root.mkdir(parents=True, exist_ok=False)
     analysis = redact_object(analysis)
     state = redact_object(state)
     generated = datetime.now(UTC).isoformat()
-    metadata = f"Repository: {analysis['repository']}\nCommit: {analysis['commit']}\nDocument version: {version}\nGenerated: {generated}\nRequirements baseline: {state['baseline_hash']}"
+    metadata = f"Application: {analysis['repository']}\nSource snapshot: {analysis['commit'][:12]} | Document version: {version}\nGenerated: {generated[:10]} | Status: draft for review"
+    graphs = graph_sets(analysis)
+    diagram_count = int("architecture" in config.documents) + 3 * int("data_flow" in config.documents)
+    total = diagram_count + len(config.documents) * (1 + int("docx" in config.formats) + int("pdf" in config.formats)) + 2
+    total += int("test_cases" in config.documents or "uat_signoff" in config.documents)
+    completed = 0
+
+    def report(message):
+        if progress:
+            progress(completed, total, message)
+
+    if "architecture" in config.documents:
+        report("Drawing architecture diagram")
+        export_graph(root / "03-architecture", "Architecture_Diagram", graphs["Architecture_Diagram"])
+        completed += 1
+    if "data_flow" in config.documents:
+        for name in ("DFD_Level_0", "DFD_Level_1", "DFD_Level_2"):
+            report("Drawing " + name.replace("_", " "))
+            export_graph(root / "04-data-flow", name, graphs[name])
+            completed += 1
     previews = {}
     for kind in config.documents:
+        logger.info("Document export started document=%s", kind)
         folder, filename, title = DOCUMENT_PATHS[kind]
         directory = root / folder
         directory.mkdir(exist_ok=True)
         sections = build_sections(kind, analysis, state)
+        report(f"Writing {title} as Markdown")
         text = markdown(title, metadata, sections)
         previews[kind] = text
         # A text preview is always retained in addition to the selected export formats.
         (directory / f"{filename}.md").write_text(text, encoding="utf-8")
+        completed += 1
         if "docx" in config.formats:
+            report(f"Writing {title} as Word")
             write_docx(directory / f"{filename}.docx", title, metadata, sections)
+            completed += 1
         if "pdf" in config.formats:
+            report(f"Writing {title} as PDF")
             write_pdf(directory / f"{filename}.pdf", title, metadata, sections)
-    graphs = graph_sets(analysis)
-    if "architecture" in config.documents:
-        export_graph(root / "03-architecture", "Architecture_Diagram", graphs["Architecture_Diagram"])
-    if "data_flow" in config.documents:
-        for name in ("DFD_Level_0", "DFD_Level_1", "DFD_Level_2"):
-            export_graph(root / "04-data-flow", name, graphs[name])
+            completed += 1
+        logger.info("Document export completed document=%s", kind)
     if "test_cases" in config.documents or "uat_signoff" in config.documents:
         (root / "02-testing").mkdir(exist_ok=True)
+        report("Writing requirements traceability workbook")
         write_rtm(root / "02-testing" / "Requirements_Traceability_Matrix.xlsx", analysis, state)
+        completed += 1
+    report("Writing source evidence and coverage reports")
     directory = root / "06-analysis"
     directory.mkdir(exist_ok=True)
     for filename, value in (
         ("Repository_Analysis_Summary.json", analysis),
         ("Evidence_Mapping.json", analysis["evidence"]),
         ("Workflow_and_Approvals.json", state),
+        ("Technical_Candidates.json", analysis.get("technical_candidates", {})),
+        ("Scope_Report.json", analysis.get("scope", {})),
     ):
         (directory / filename).write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
     (directory / "Documentation_Gaps.md").write_text(
         "# Documentation Gaps\n\n" + "\n".join(f"- {g}" for g in analysis["gaps"]), encoding="utf-8"
     )
+    write_appendices(directory, analysis)
+    scope = analysis.get("scope", {})
+    scope_lines = ["# Scan Coverage", "", "## Paths that could not be inspected", ""]
+    if scope.get("budget_reached"):
+        scope_lines.insert(2, "The selected analysis budget was reached. Some additional source files were not inspected.\n")
+    for item in scope.get("skipped_files", []):
+        code = f" (OS code: {item['code']})" if item.get("code") is not None else ""
+        scope_lines.append(f"- {item['path']} — {item['message']}{code}")
+    if "scope" not in analysis:
+        scope_lines.append("Per-path coverage metadata was not recorded for this older analysis. Start a new analysis to obtain the detailed coverage report.")
+    elif not scope.get("skipped_files"):
+        scope_lines.append("No unreadable paths were encountered.")
+    scope_lines.extend(["", "## Automatically excluded paths", ""])
+    scope_lines.extend(f"- {item['path']} — {item['reason']}" for item in scope.get("auto_exclusions", []))
+    scope_lines.extend(["", "## Suggested docagentignore patterns", "",
+                        "Review these patterns before adding them. Use !path/to/file.js to include an automatically detected generated file.", ""])
+    scope_lines.extend(scope.get("suggested_ignore_patterns", []))
+    (directory / "Scope_Report.md").write_text("\n".join(scope_lines), encoding="utf-8")
+    index = "\n".join(f"- [{DOCUMENT_PATHS[kind][2]}]({DOCUMENT_PATHS[kind][0]}/{DOCUMENT_PATHS[kind][1]}.md)" for kind in config.documents)
     (root / "README.md").write_text(
-        f"# Repository Documentation\n\n{metadata}\n\nGenerated requirements and tests require review. Approvals are recorded only from authenticated, authorized human decisions.\n\nSelected documents: {', '.join(config.documents)}.\n\nEvidence links are pinned to the analyzed commit. Markdown previews are always included. Private repository URLs require GitHub access.\n",
+        f"# Application Documentation\n\n{metadata}\n\n## Reading order\n\n{index}\n\nThe main documents group application capabilities and contain proposed scenarios with explicit expected outcomes. Missing test design is disclosed. No execution or approval is implied.\n\nTechnical reviewers can follow [source citations](06-analysis/Evidence_Register.md), [API details](06-analysis/API_Reference.md), [implementation findings](06-analysis/Technical_Reference.md) and [limitations](06-analysis/Documentation_Gaps.md). Original implementation candidates and placeholder tests are preserved in Technical_Candidates.json.\n\nSource commit: {analysis['commit']}\nRequirements baseline: {state['baseline_hash']}\n",
         encoding="utf-8",
     )
+    if scope.get("partial"):
+        readme = root / "README.md"
+        readme.write_text(readme.read_text(encoding="utf-8") + "\nCoverage warning: some paths could not be inspected or the selected budget was reached. Results are partial. See [Scan coverage](06-analysis/Scope_Report.md).\n", encoding="utf-8")
+    completed += 1
+    report("Building documentation ZIP")
     manifest = [
         {"path": p.relative_to(root).as_posix(), "bytes": p.stat().st_size}
         for p in sorted(root.rglob("*"))
@@ -472,4 +241,28 @@ def export_package(root: Path, analysis, config, state, version):
         for file in root.rglob("*"):
             if file.is_file():
                 archive.write(file, "repository-documentation/" + file.relative_to(root).as_posix())
+    completed += 1
+    report("Documentation package built; publishing artifacts")
     return manifest
+
+
+def write_appendices(directory, analysis):
+    evidence = {e["id"]: e for e in analysis["evidence"]}
+    register = ["# Source Evidence Register", "", "Source citations are pinned to the inspected commit. Private repository links require access.", ""]
+    for item in analysis["evidence"]:
+        register.extend([f"## {item['id']}", "", evidence_text([item["id"]], evidence, analysis["repository"]), ""])
+    (directory / "Evidence_Register.md").write_text("\n".join(register), encoding="utf-8")
+    technical = ["# Implementation Reference", "", "This appendix retains extracted declarations and conditions. These are implementation findings rather than approved application requirements.", ""]
+    api = ["# API Reference", "", "Declared routes are not proof of runtime payloads or access policy. Supporting examples are labelled explicitly.", ""]
+    from docagent.reporting import supporting_path
+
+    for finding in analysis["findings"]:
+        technical.extend([f"## {finding['title']}", "", finding["detail"], "",
+                          "Evidence: " + ", ".join(finding["evidence_ids"]), ""])
+        if finding["kind"] == "api":
+            path = evidence[finding["evidence_ids"][0]]["path"]
+            api.extend([f"## {finding['title']}", "", f"Scope: {'Supporting example or test' if supporting_path(path) else 'Application'}.",
+                        f"Declared handler: {finding['metadata'].get('handler', 'Unresolved')}.",
+                        "Evidence: " + ", ".join(finding["evidence_ids"]), ""])
+    (directory / "Technical_Reference.md").write_text("\n".join(technical), encoding="utf-8")
+    (directory / "API_Reference.md").write_text("\n".join(api), encoding="utf-8")

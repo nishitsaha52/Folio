@@ -163,6 +163,21 @@ export function Configure({
                     : "Up to 15,000 files and 40 AI batches."}{" "}
                 Analysis limits and omissions are recorded in the report.
               </p>
+              <details className="form-note">
+                <summary>Which files are included?</summary>
+                <p>
+                  Folio inspects source code, tests and project configuration.
+                  Dependency folders, caches, build directories and
+                  fingerprinted or minified browser bundles are excluded
+                  automatically.
+                </p>
+                <p>
+                  Review the Scan coverage section after analysis for excluded
+                  paths, reasons and suggested .docagentignore rules. Keep
+                  original frontend source included. Use !path/to/file.js to
+                  override an automatic generated-file exclusion.
+                </p>
+              </details>
             </section>
             <section className="panel">
               <div className="panel-heading">

@@ -4,6 +4,7 @@ import ast
 import hashlib
 import json
 import re
+import time
 import tomllib
 from collections import Counter
 from pathlib import Path
@@ -15,6 +16,7 @@ from packaging.requirements import Requirement as PackageRequirement
 from docagent.config import settings
 from docagent.db import ScanCache, digest, save_cache
 from docagent.imports import import_edges
+from docagent.scan_scope import ScanPolicyError, explicitly_included, generated_reason, unreadable
 from docagent.schemas import Confidence, Evidence, Finding, Requirement, TestCase
 from docagent.security import redact, redact_object, secret_path
 
@@ -644,36 +646,90 @@ def analyze_file(path, text):
     return c.payload()
 
 
-def scan_repository(root: Path, commit: str, depth="standard", db=None, cache_scope="local", progress=None):
+def scan_repository(root: Path, commit: str, depth="standard", db=None, cache_scope="local", progress=None,
+                    on_event=None, skipped_paths=None):
     cfg = settings()
     root = root.resolve()
     limit = {"basic": 400, "standard": 3000, "comprehensive": 15000}[depth]
     byte_limit = {"basic": 4_000_000, "standard": 20_000_000, "comprehensive": 80_000_000}[depth]
     rules = []
+    skipped = list(skipped_paths or [])
+    skipped_names = {item["path"] for item in skipped}
+    if skipped_names & {".gitignore", ".docagentignore"}:
+        raise ScanPolicyError("Repository ignore policy could not be retrieved")
+    automatic, suggestions = [], set()
     for ignore in (".gitignore", ".docagentignore"):
         path = root / ignore
-        if path.is_file() and not path.is_symlink() and path.stat().st_size < 100_000:
-            rules.extend(path.read_text(errors="replace").splitlines())
+        try:
+            if path.is_symlink():
+                raise ScanPolicyError("Repository ignore policy must be a regular file")
+            if path.is_file():
+                if path.stat().st_size >= 100_000:
+                    raise ScanPolicyError("Repository ignore policy exceeds the configured size limit")
+                rules.extend(path.read_text(errors="replace").splitlines())
+        except OSError as exc:
+            raise ScanPolicyError("Repository ignore policy could not be read") from exc
     spec = pathspec.PathSpec.from_lines("gitwildmatch", rules)
     inventory, findings, evidence, imports, gaps = [], [], [], {}, []
     reused, scanned, total_bytes, excluded = 0, 0, 0, 0
+    budget_reached = False
+    last_event = -float("inf")
+
+    def report(path="", force=False):
+        nonlocal last_event
+        if on_event and (force or time.monotonic() - last_event >= 0.5):
+            on_event({"scanned_files": scanned, "skipped_files": len(skipped),
+                      "auto_excluded_files": len(automatic), "current_path": redact(path)})
+            last_event = time.monotonic()
+
+    def walk_error(exc):
+        path = Path(exc.filename or root)
+        if path == root:
+            raise exc
+        relative = path.relative_to(root).as_posix() if path.is_relative_to(root) else "(directory)"
+        skipped.append(unreadable(relative, exc, "unreadable_directory"))
+
+    report(force=True)
     # top-down traversal prunes dependencies instead of enumerating their entire contents.
     import os
 
-    for directory, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = sorted(
-            d
-            for d in dirs
-            if d not in IGNORED
-            and not (Path(directory) / d).is_symlink()
-            and not secret_path((Path(directory) / d).relative_to(root).as_posix())
-            and not spec.match_file((Path(directory) / d).relative_to(root).as_posix() + "/")
-        )
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
+        for d in dirs:
+            if d in IGNORED and d not in {".git", ".data"}:
+                relative_dir = (Path(directory) / d).relative_to(root).as_posix() + "/"
+                automatic.append({"path": relative_dir, "reason": "Dependency, cache or build directory"})
+        kept = []
+        for d in sorted(dirs):
+            child = Path(directory) / d
+            relative_dir = child.relative_to(root).as_posix() + "/"
+            if d in IGNORED or secret_path(relative_dir) or spec.match_file(relative_dir):
+                continue
+            try:
+                if not child.is_symlink():
+                    kept.append(d)
+            except OSError as exc:
+                skipped.append(unreadable(relative_dir, exc, "unreadable_directory"))
+        dirs[:] = kept
         for filename in sorted(files):
             file = Path(directory) / filename
             relative = file.relative_to(root).as_posix()
-            if file.is_symlink() or secret_path(relative) or spec.match_file(relative):
+            report(relative)
+            if redact(relative) in skipped_names:
+                continue
+            try:
+                symlink = file.is_symlink()
+            except OSError as exc:
+                skipped.append(unreadable(relative, exc))
+                continue
+            if symlink or secret_path(relative) or spec.match_file(relative):
                 excluded += 1
+                continue
+            reason = generated_reason(relative)
+            if reason and not explicitly_included(spec, relative):
+                excluded += 1
+                automatic.append({"path": redact(relative), "reason": reason})
+                suggestions.add(str(file.parent.relative_to(root)).replace("\\", "/") + "/**"
+                                if file.parent.name == "assets" else relative)
                 continue
             if file.suffix.lower() not in TEXT_EXTENSIONS and filename.lower() not in {
                 "dockerfile",
@@ -693,17 +749,28 @@ def scan_repository(root: Path, commit: str, depth="standard", db=None, cache_sc
             }:
                 excluded += 1
                 continue
-            size = file.stat().st_size
+            try:
+                size = file.stat().st_size
+            except OSError as exc:
+                skipped.append(unreadable(relative, exc))
+                continue
             if size > cfg.max_file_bytes:
                 gaps.append(f"File exceeds analysis size limit: {relative}")
+                skipped.append({"path": redact(relative), "reason": "file_size_limit", "code": None,
+                                "message": "File exceeds the configured analysis size limit."})
                 continue
             if scanned >= limit or total_bytes + size > byte_limit:
+                budget_reached = True
                 gaps.append(
                     f"{depth.title()} analysis budget reached. Some files were not inspected; use a deeper scan or narrow .docagentignore."
                 )
                 dirs[:] = []
                 break
-            raw = file.read_bytes()
+            try:
+                raw = file.read_bytes()
+            except OSError as exc:
+                skipped.append(unreadable(relative, exc))
+                continue
             if b"\0" in raw:
                 excluded += 1
                 continue
@@ -735,6 +802,14 @@ def scan_repository(root: Path, commit: str, depth="standard", db=None, cache_sc
             gaps.extend(payload["gaps"])
             if progress and scanned % 100 == 0:
                 progress(scanned)
+    report(force=True)
+    if progress:
+        progress(scanned)
+    for item in skipped:
+        code = f"; OS code {item['code']}" if item.get("code") is not None else ""
+        gaps.append(f"Not inspected: {item['path']} ({item['reason']}{code}). {item['message']}")
+    if automatic:
+        gaps.append(f"Automatically excluded {len(automatic)} generated files or dependency/build directories. See Scope_Report.json for paths, reasons and suggested ignore rules.")
     edges = import_edges(root, inventory, imports)
     requirements = candidate_requirements(findings, evidence)
     if not any(f["kind"] == "test" for f in findings):
@@ -769,6 +844,9 @@ def scan_repository(root: Path, commit: str, depth="standard", db=None, cache_sc
         },
         "usage": [],
         "execution": None,
+        "scope": {"skipped_files": skipped, "auto_exclusions": automatic,
+                  "suggested_ignore_patterns": sorted(suggestions), "partial": bool(skipped) or budget_reached,
+                  "budget_reached": budget_reached},
     }
 
 

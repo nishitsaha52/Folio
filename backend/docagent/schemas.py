@@ -128,11 +128,11 @@ class LLMRequirement(StrictModel):
     title: str
     statement: str
     evidence_ids: list[str]
-    scenarios: list[LLMScenario] = Field(default_factory=list)
+    scenarios: list[LLMScenario] = Field(default_factory=list, max_length=3)
 
 
 class LLMOutput(StrictModel):
-    requirements: list[LLMRequirement]
+    requirements: list[LLMRequirement] = Field(max_length=6)
     gaps: list[str]
 
 

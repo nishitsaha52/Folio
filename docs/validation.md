@@ -1,5 +1,17 @@
 # Validation record
 
+## 19 November 2026 AI synthesis progress and bounded recovery
+
+A subsequent comprehensive analysis stayed at 55% while its worker repeatedly received invalid or empty Gemini responses. Logs showed three attempts per batch, often taking about 30 seconds each, with no batch-level UI progress. The original logs did not include provider finish reasons, so truncation was not established as the exact cause of every invalid response.
+
+Changed synthesis to smaller whole-evidence batches (at most eight records and an 8,000-character target), bounded output (six concise requirements and three scenarios per requirement), and a larger Gemini output allowance. Added finish-reason checks, safe validation-error types, per-batch progress, a 60-second request timeout and a 300-second AI-phase budget. Malformed responses are not retried unchanged; repeated invalid responses or permanent provider errors stop further use of that provider while preserving available results and static findings. Cache checkpoints precede separate job-progress transactions, with a regression for SQLite writer-lock conflicts and lease-loss propagation.
+
+After a synthetic-only schema check passed, the user explicitly approved resuming repository evidence processing with Gemini. The existing job recovered with its persisted source commit and completed at 100% in about 310 seconds. Fifteen Gemini batches succeeded, yielding 73 AI-derived requirements alongside 204 static requirements (277 total). One final request, started with about three seconds left in the AI budget, returned HTTP 400; subsequent provider work stopped and the remaining AI coverage was recorded as gaps. The final code avoids scheduling new requests in the last five seconds of a normal request budget. This was partial AI coverage, not successful processing of all 40 selected batches.
+
+Verified the committed PostgreSQL version against the MinIO ZIP checksum and CRC. The package contains 37 entries: seven DOCX files, one XLSX, four SVGs and four PNGs plus Markdown/JSON/source artifacts; PDF was not selected for this run. Evidence is retained under `.data/runtime/recovered-analysis.json` and `recovered-analysis.zip`. Original results were preserved. The worker and scheduler remain running; current process/log paths are in `.data/runtime/background-processes.json`.
+
+Final verification: **114 tests passed, one integration test skipped**; Ruff and diff checks passed. New regressions cover progress, total budgets, budget-edge admission, truncated responses, SDK retry/timeout settings, repeated malformed responses, lease-loss propagation and cache/progress transactions. Live worker inspection reported one responding worker after reloading the final code. Other providers, full AI evidence coverage and semantic acceptance remain separate validation work.
+
 ## 19 November 2026 queued-job and diagnostic follow-up
 
 The user's live repository analysis remained at `Waiting for worker`: configuration selected Celery, but only the native API was running. Redis contained one broker delivery, no worker replied to inspection, and process inspection found no worker or scheduler. Started separate Windows `solo` worker and scheduler processes; the original job completed at 100% with a committed document version and 204 static requirements. These user-facing background services remain running, with process IDs and log paths recorded in the ignored `.data/runtime/background-processes.json`.

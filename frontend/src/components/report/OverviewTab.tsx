@@ -22,6 +22,76 @@ export function OverviewTab({
           </div>
         ))}
       </div>
+      {analysis.scope && (
+        <section className="panel scan-coverage" aria-label="Scan coverage">
+          <h2>
+            {analysis.scope.partial
+              ? "Documentation has coverage gaps"
+              : "Scan coverage"}
+          </h2>
+          <p>
+            {analysis.scope.skipped_files.length} paths could not be inspected ·{" "}
+            {analysis.scope.auto_exclusions.length} generated or dependency
+            paths automatically excluded.
+          </p>
+          {analysis.scope.budget_reached && (
+            <p>
+              The analysis budget was reached. Increase analysis depth or refine
+              your ignore rules to inspect more source files.
+            </p>
+          )}
+          {analysis.scope.skipped_files.length > 0 && (
+            <details open>
+              <summary>Skipped paths</summary>
+              <ul>
+                {analysis.scope.skipped_files
+                  .slice(0, 20)
+                  .map((item, index) => (
+                    <li key={item.path + "-" + index}>
+                      <code>{item.path}</code> — {item.message}{" "}
+                      {item.code !== null && "(OS code " + item.code + ")"}
+                    </li>
+                  ))}
+              </ul>
+              <p className="form-note">
+                Full details are included in 06-analysis/Scope_Report.md and
+                Scope_Report.json.
+              </p>
+            </details>
+          )}
+          {analysis.scope.auto_exclusions.length > 0 && (
+            <details>
+              <summary>Automatically excluded paths and reasons</summary>
+              <ul>
+                {analysis.scope.auto_exclusions
+                  .slice(0, 20)
+                  .map((item, index) => (
+                    <li key={item.path + "-" + index}>
+                      <code>{item.path}</code> — {item.reason}
+                    </li>
+                  ))}
+              </ul>
+            </details>
+          )}
+          <p className="form-note">
+            Up to 20 paths per list are shown here. The complete coverage report
+            is included in 06-analysis/Scope_Report.md and Scope_Report.json.
+          </p>
+          {!!analysis.scope.suggested_ignore_patterns.length && (
+            <details>
+              <summary>Suggested .docagentignore rules</summary>
+              <p>
+                Review these rules before adding them to your repository. Prefix
+                a file rule with ! to include an automatically detected
+                generated file.
+              </p>
+              <pre className="code-block">
+                {analysis.scope.suggested_ignore_patterns.join("\n")}
+              </pre>
+            </details>
+          )}
+        </section>
+      )}
       <div className="report-columns">
         <section className="panel">
           <div className="panel-heading">

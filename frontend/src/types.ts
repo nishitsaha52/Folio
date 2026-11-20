@@ -110,6 +110,18 @@ export interface Analysis {
     output_tokens?: number;
   }[];
   execution: Record<string, unknown> | null;
+  scope?: {
+    partial: boolean;
+    budget_reached?: boolean;
+    skipped_files: {
+      path: string;
+      reason: string;
+      code: number | null;
+      message: string;
+    }[];
+    auto_exclusions: { path: string; reason: string }[];
+    suggested_ignore_patterns: string[];
+  };
   changes?: {
     added: string[];
     removed: string[];
@@ -129,8 +141,26 @@ export interface Job {
   version: number;
   baseline_hash: string;
   created: string;
+  updated?: string;
+  diagnostics?: {
+    stage: string;
+    backend?: string | null;
+    latest_failure?: JobEvent | null;
+    history: JobEvent[];
+  };
   analysis?: Analysis;
   workflow?: Workflow;
+}
+export interface JobEvent {
+  action: string;
+  created: string;
+  stage?: string;
+  stage_progress?: number;
+  message?: string;
+  last_message?: string;
+  error_type?: string;
+  reason_code?: string;
+  backend?: string;
 }
 export interface Artifact {
   path: string;

@@ -103,7 +103,7 @@ class LocalArtifactStorage:
         return target
 
     @contextmanager
-    def export_directory(self, job_id: str, version: int):
+    def export_directory(self, job_id: str, version: int, on_publish=None):
         # export_package creates this directory exclusively, reserving the version.
         with storage_errors():
             if self.version_exists(job_id, version):
@@ -173,7 +173,7 @@ class S3ArtifactStorage:
             return any(item["Key"] == key for item in objects.get("Contents", []))
 
     @contextmanager
-    def export_directory(self, job_id: str, version: int):
+    def export_directory(self, job_id: str, version: int, on_publish=None):
         with storage_errors():
             if self.version_exists(job_id, version):
                 raise StorageError("Artifact version already exists")
@@ -187,8 +187,11 @@ class S3ArtifactStorage:
             with tempfile.TemporaryDirectory(prefix="docagent-export-", dir=self.scratch) as temp:
                 root = Path(temp) / version_name(version)
                 yield root
-                for file in sorted(root.rglob("*")):
+                files = [file for file in sorted(root.rglob("*")) if file.is_file()]
+                for index, file in enumerate(files):
                     if file.is_file():
+                        if on_publish:
+                            on_publish(index, len(files) + 1, file.relative_to(root).as_posix())
                         self.client.upload_file(
                             str(file),
                             self.bucket,
@@ -198,6 +201,8 @@ class S3ArtifactStorage:
                                 or "application/octet-stream"
                             },
                         )
+                if on_publish:
+                    on_publish(len(files), len(files) + 1, "documentation.zip")
                 self.client.upload_file(
                     str(root.with_suffix(".zip")),
                     self.bucket,
